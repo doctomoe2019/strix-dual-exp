@@ -27,24 +27,43 @@ that made the link resilient enough to serve from.
 
 ## What we have achieved so far
 
-- **A low-latency, high-bandwidth stream transport over USB4v2** between
-  two hosts: frame-oriented sessions on the NHI DMA rings with E2E flow
-  control, zero-copy character-device interface, and per-session HopID
-  rotation — no NIC involved at any point.
-- **gufo serving over it**: two-rank tensor parallelism with all
-  cross-rank traffic on the stream transport. For Qwen3.8-Flash-Next in
-  Q4 quantization this reaches **up to 2195 tok/s prefill (pp)** and
-  **63.3 tok/s decode (tg)** on the pair (recorded, width-1 requests —
-  see `docs/performance.md` for tables with provenance and the
-  single-host comparison; multi-user batching on the pair is still to
-  be benchmarked).
-- **A link that survives its own hardware.** The Barlow Ridge
-  host-to-host link has a failure mode where stream teardown desyncs
-  one host's NHI control plane until reboot (correlated with individual
-  cable ends; see `docs/wedge-investigation.md`). It is now fully
-  self-healing: detection, forced link disconnect/retrain, re-
-  enumeration and re-configuration happen autonomously in ~8 s, with
-  serving continuing through the event.
+**1. A low-latency, high-bandwidth stream transport over USB4v2.** Two
+hosts, frame-oriented sessions on the NHI DMA rings, E2E flow control,
+zero-copy character-device interface — no NIC and no kernel IP stack in
+the serving path:
+
+| | tbnet (IP over the same link) | verbs (RDMA NIC baseline) | **tbstream (this work)** |
+| --- | ---: | ---: | ---: |
+| Round-trip latency | 67–80 µs (ping RTT) | 24 µs | **p50 22–23 µs, p99 34–42 µs** (10 KiB exchange) |
+| Bulk bandwidth | 28.5–31.7 Gbit/s (iperf3 TCP) | n/a | 1.0–1.1 GB/s in serving config; **5.0 GB/s** @ 32 MiB frames |
+
+The stream matches the RDMA latency baseline with no RDMA hardware at
+all — a round-trip 10 KiB exchange over USB4v2 is faster than a bare
+ping through tbnet's kernel IP stack. At the serving end the GPU writes
+its partial sums straight into ring buffers, so there are no sockets
+and no copies. Provenance in `docs/performance.md`.
+
+**2. gufo serving over it** — two-rank tensor parallelism with all
+cross-rank traffic on the stream transport, Qwen3.8-Flash-Next Q4:
+
+| | Single host | **Dual-host TP2 (this work)** | Gain |
+| --- | ---: | ---: | ---: |
+| Prefill pp, depth 0 | 1628.5 tok/s | **up to 2195.5 tok/s** | +35 % |
+| Prefill pp, long context | 1335.9 tok/s @ 131k | 2104.6 tok/s @ 61k | +58 % |
+| Decode tg (single user) | 25.9 AR / 59.2 MTP-rep | **63.3 tok/s (MTP)** | up to +7 % vs best single-host mode |
+| Fits at 262 144-token context | Q4 only (87 GB) | **Q8 as TP2 shards**, loaded in ~36 s | — |
+
+All dual-host numbers are recorded artifacts (39 requests, width-1,
+MTP acceptance 60–87 %); multi-user batching on the pair is the next
+benchmark to run. Provenance in `docs/performance.md`.
+
+**3. A link that survives its own hardware.** The Barlow Ridge
+host-to-host link has a failure mode where stream teardown desyncs
+one host's NHI control plane until reboot (correlated with individual
+cable ends; see `docs/wedge-investigation.md`). It is now fully
+self-healing: detection, forced link disconnect/retrain, re-
+enumeration and re-configuration happen autonomously in ~8 s, with
+serving continuing through the event.
 
 ## Ongoing work
 
