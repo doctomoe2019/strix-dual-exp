@@ -33,8 +33,11 @@ that made the link resilient enough to serve from.
   rotation — no NIC involved at any point.
 - **gufo serving over it**: two-rank tensor parallelism with all
   cross-rank traffic on the stream transport. For Qwen3.8-Flash-Next in
-  Q4 quantization this reaches **up to ~2100 tok/s prefill (pp)** and
-  **up to ~75 tok/s generation (tg)** on the pair.
+  Q4 quantization this reaches **up to 2195 tok/s prefill (pp)** and
+  **63.3 tok/s decode (tg)** on the pair (recorded, width-1 requests —
+  see `docs/performance.md` for tables with provenance and the
+  single-host comparison; multi-user batching on the pair is still to
+  be benchmarked).
 - **A link that survives its own hardware.** The Barlow Ridge
   host-to-host link has a failure mode where stream teardown desyncs
   one host's NHI control plane until reboot (correlated with individual
@@ -72,7 +75,8 @@ that made the link resilient enough to serve from.
 - `scripts/` — day-2 operations: link bring-up, pair qualification and
   storm validation, forensics capture, and the `tbstream-heal@`
   last-mile healer (systemd unit included).
-- `docs/` — architecture notes, the full experiment log of the link
+- `docs/` — architecture notes, the performance record (recorded pp/tg/
+  latency tables with provenance), the full experiment log of the link
   robustness investigation, and an upstream report draft for a control
   channel stall found on the way.
 
