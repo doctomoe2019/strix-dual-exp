@@ -17,7 +17,7 @@ Qualification gates, as recorded in gufo's
 | One-way bandwidth, 32 MiB frames | 1.13–1.14 GB/s | serving config |
 | Bulk one-way, 32 MiB frames | 5.0 GB/s | `evidence/bw-final-r0.log` |
 
-For scale: the raw link is 40 Gb/s dual-lane Gen4 class.
+For scale: the raw link is 40 Gbit/s dual-lane Gen4 class (5 GB/s line rate).
 
 ### tbnet head-to-head (measured 2026-10-04, same link)
 
@@ -27,8 +27,11 @@ tbnet (thunderbolt-net, kernel IP over the same XDomain link), MTU
 | Metric | tbnet | tbstream | Note |
 | --- | ---: | ---: | --- |
 | Latency | 67–80 µs RTT (`ping -i 0.02 -c 50`) | p50 22–23 µs round-trip 10 KiB exchange | the stream's full 10 KiB round-trip beats tbnet's bare ICMP RTT |
-| Bulk bandwidth | 28.5 Gbit/s rx / 31.7 Gbit/s tx (iperf3 TCP, 4 s) | 1.0–1.1 GB/s serving config; 5.0 GB/s @ 32 MiB frames | tbnet's TCP bulk is strong, but its latency and per-packet IP-stack cost is what serving cannot afford |
+| Bulk bandwidth | 3.6 GB/s rx / 4.0 GB/s tx (iperf3 TCP, 4 s; 28.5 / 31.7 Gbit/s) | 1.0–1.1 GB/s serving config; 5.0 GB/s @ 32 MiB frames | tbnet's TCP bulk is strong, but its latency and per-packet IP-stack cost is what serving cannot afford |
 | Serving path | sockets, kernel IP stack, copies | zero-copy char device; GPU writes partials into ring buffers | the decode loop is latency-bound at 10 KiB exchanges |
+
+All bandwidth figures in GB/s (1 GB/s = 8 Gbit/s). For scale: the raw
+link is 40 Gbit/s (= 5 GB/s line rate) dual-lane Gen4 class.
 
 ## Dual-host TP2 serving (Qwen3.8-Flash-Next Q4)
 

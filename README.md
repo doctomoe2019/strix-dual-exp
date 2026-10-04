@@ -35,7 +35,7 @@ the serving path:
 | | tbnet (IP over the same link) | verbs (RDMA NIC baseline) | **tbstream (this work)** |
 | --- | ---: | ---: | ---: |
 | Round-trip latency | 67–80 µs (ping RTT) | 24 µs | **p50 22–23 µs, p99 34–42 µs** (10 KiB exchange) |
-| Bulk bandwidth | 28.5–31.7 Gbit/s (iperf3 TCP) | n/a | 1.0–1.1 GB/s in serving config; **5.0 GB/s** @ 32 MiB frames |
+| Bulk bandwidth | 3.6–4.0 GB/s (iperf3 TCP) | n/a | 1.0–1.1 GB/s in serving config; **5.0 GB/s** @ 32 MiB frames |
 
 The stream matches the RDMA latency baseline with no RDMA hardware at
 all — a round-trip 10 KiB exchange over USB4v2 is faster than a bare
