@@ -1,0 +1,357 @@
+--- a/drivers/thunderbolt/xdomain.c	2026-10-03 11:34:54.653690419 +0200
++++ b/drivers/thunderbolt/xdomain.c	2026-10-04 14:52:24.629981215 +0200
+@@ -70,6 +70,16 @@
+  */
+ static DEFINE_MUTEX(xdomain_lock);
+ 
++/*
++ * All XDomain protocol works (handshake state machine, keep-alive,
++ * properties-changed and request handling) run on this dedicated
++ * ordered workqueue instead of tb->wq: a stalled synchronous control
++ * request against a wedged peer (rare cancel-path race in
++ * tb_cfg_request_sync) then only stalls this queue, never the
++ * domain workqueue that hotplug and tunnel management depend on.
++ */
++static struct workqueue_struct *tb_xd_state_wq;
++
+ /* Properties exposed to the remote domains */
+ static struct tb_property_dir *xdomain_property_dir;
+ static u32 xdomain_property_block_gen;
+@@ -737,7 +747,7 @@
+ static void start_handshake(struct tb_xdomain *xd)
+ {
+ 	xd->state = XDOMAIN_STATE_INIT;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+ }
+ 
+@@ -812,7 +822,7 @@
+ 		if (xd) {
+ 			mutex_lock(&xd->lock);
+ 			if (!xd->removing && device_is_registered(&xd->dev))
+-				queue_delayed_work(tb->wq, &xd->state_work,
++				queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 						   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+ 			mutex_unlock(&xd->lock);
+ 		}
+@@ -903,7 +913,7 @@
+ 			mutex_lock(&xd->lock);
+ 			if (!xd->removing) {
+ 				xd->target_link_width = lsc->tlw;
+-				queue_delayed_work(tb->wq, &xd->state_work,
++				queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 						   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+ 			}
+ 			mutex_unlock(&xd->lock);
+@@ -996,7 +1006,7 @@
+ 	if (xd) {
+ 		mutex_lock(&xd->lock);
+ 		if (!xd->removing)
+-			queue_delayed_work(xd->tb->wq,
++			queue_delayed_work(tb_xd_state_wq,
+ 					   &xd->properties_changed_work,
+ 					   msecs_to_jiffies(50));
+ 		mutex_unlock(&xd->lock);
+@@ -1536,6 +1546,102 @@
+ 	return 0;
+ }
+ 
++/*
++ * Persistent XDomain properties failure with a healthy local control
++ * channel means the peer host is wedged: its control channel desyncs
++ * (one lost config reply advances the router sequence counters past
++ * the host's; every later exchange is treated as stale) and nothing
++ * short of a link retrain resynchronises it. We cannot heal the
++ * remote host directly, but the shared link can be retrained from
++ * either end by rewriting the local lane adapter target speed. This
++ * resets both link controllers and clears the desync, letting the
++ * peer's XDomain state machine recover without a reboot.
++ *
++ * The counter counts consecutive failed properties attempts (both
++ * EAGAIN retries and give-ups) and must fire within a single failed
++ * retry pass (XDOMAIN_RETRIES = 10), because the stock state machine
++ * parks in XDOMAIN_STATE_ERROR after one pass. Guarded by
++ * have-seen-success so that boot-time handshake failures against a
++ * not-yet-ready peer never force a pointless retrain. Kept as
++ * file-statics (keyed by route) to avoid changing the exported
++ * struct layout; safe because the state work is serialized per
++ * XDomain.
++ */
++#define TBSTREAM_XD_RETRAIN_STREAK	8
++/* Unarmed fallback: a peer that wedged during its boot settle would
++ * otherwise never arm the detector (3 consecutive successes never
++ * happen). ~36 consecutive failed probes ≈ 100+ s — well past any
++ * normal boot settle, short enough to recover promptly. */
++#define TBSTREAM_XD_RETRAIN_STREAK_UNARMED	36
++
++static u64 tb_xd_streak_route;
++static unsigned int tb_xd_streak;
++static bool tb_xd_streak_seen;
++static unsigned int tb_xd_streak_ok;
++static unsigned int tb_xd_retrains;
++
++static void tb_xdomain_force_retrain(struct tb_xdomain *xd);
++
++struct tb_xd_retrain_work {
++	struct work_struct work;
++	struct tb_xdomain *xd;
++};
++
++/*
++ * Runs on system_wq: the lane-adapter writes below are local register
++ * operations, but keeping the retrain out of the XDomain state work
++ * means a slow peer can never stall the thunderbolt workqueue.
++ */
++static void tb_xd_retrain_workfn(struct work_struct *work)
++{
++	struct tb_xd_retrain_work *rw = container_of(work, typeof(*rw), work);
++	struct tb_xdomain *xd = rw->xd;
++	struct tb_port *port = tb_xdomain_downstream_port(xd);
++	u32 val, off;
++	int ret;
++
++	if (port) {
++		ret = tb_port_read(port, &val, TB_CFG_PORT,
++				   port->cap_phy + LANE_ADP_CS_1, 1);
++		if (!ret) {
++			dev_info(&xd->dev,
++				 "peer unresponsive, forcing link disconnect\n");
++
++			/* Lane Disable: the link controller drops the
++			 * link — the software equivalent of unplugging
++			 * the cable, and the only transition that resets
++			 * the router config relay a wedged peer hangs
++			 * on. The peer sees a real unplug/plug sequence
++			 * and re-enumerates. */
++			off = val | LANE_ADP_CS_1_LD;
++			tb_port_write(port, &off, TB_CFG_PORT,
++				      port->cap_phy + LANE_ADP_CS_1, 1);
++			msleep(2000);
++			tb_port_write(port, &val, TB_CFG_PORT,
++				      port->cap_phy + LANE_ADP_CS_1, 1);
++		}
++	}
++
++	tb_xdomain_put(xd);
++	kfree(rw);
++}
++
++static void tb_xdomain_force_retrain(struct tb_xdomain *xd)
++{
++	struct tb_xd_retrain_work *rw;
++
++	rw = kmalloc(sizeof(*rw), GFP_KERNEL);
++	if (!rw)
++		return;
++	rw->xd = tb_xdomain_get(xd);
++	if (!rw->xd) {
++		kfree(rw);
++		return;
++	}
++	INIT_WORK(&rw->work, tb_xd_retrain_workfn);
++	schedule_work(&rw->work);
++}
++
+ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
+ {
+ 	struct tb_property_dir *dir;
+@@ -1551,6 +1657,25 @@
+ 					xd->remote_uuid, xd->state_retries,
+ 					&block, &gen);
+ 	if (ret < 0) {
++		if (tb_xd_streak_route != xd->route) {
++			tb_xd_streak_route = xd->route;
++			tb_xd_streak = 0;
++		}
++		tb_xd_streak_ok = 0;
++		if (++tb_xd_streak >= (tb_xd_streak_seen ?
++				       TBSTREAM_XD_RETRAIN_STREAK :
++				       TBSTREAM_XD_RETRAIN_STREAK_UNARMED)) {
++			tb_xd_streak = 0;
++			if (tb_xd_retrains < 5) {
++				/* Restart the retry pass so further
++				 * retrains can fire if one is not
++				 * enough; capped per wedge episode. */
++				tb_xd_retrains++;
++				xd->state_retries = XDOMAIN_RETRIES;
++				tb_xdomain_force_retrain(xd);
++			}
++		}
++
+ 		if (xd->state_retries-- > 0) {
+ 			dev_dbg(&xd->dev,
+ 				"failed to request remote properties, retrying\n");
+@@ -1563,6 +1688,16 @@
+ 		return ret;
+ 	}
+ 
++	tb_xd_streak = 0;
++	/*
++	 * Arm the wedge detector only after a few consecutive successes:
++	 * a freshly booted peer can be briefly unresponsive while its
++	 * stack settles, which must not trigger a spurious disconnect.
++	 */
++	if (++tb_xd_streak_ok >= 3)
++		tb_xd_streak_seen = true;
++	tb_xd_retrains = 0;
++
+ 	mutex_lock(&xd->lock);
+ 
+ 	/* Only accept newer generation properties */
+@@ -1655,7 +1790,7 @@
+ {
+ 	xd->state = XDOMAIN_STATE_UUID;
+ 	xd->state_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+ }
+ 
+@@ -1663,7 +1798,7 @@
+ {
+ 	xd->state = XDOMAIN_STATE_LINK_STATUS;
+ 	xd->state_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+@@ -1671,7 +1806,7 @@
+ {
+ 	xd->state = XDOMAIN_STATE_LINK_STATUS2;
+ 	xd->state_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+@@ -1686,7 +1821,7 @@
+ 	}
+ 
+ 	xd->state_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+@@ -1694,7 +1829,7 @@
+ {
+ 	xd->state = XDOMAIN_STATE_BONDING_UUID_LOW;
+ 	xd->state_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+@@ -1702,21 +1837,21 @@
+ {
+ 	xd->state = XDOMAIN_STATE_PROPERTIES;
+ 	xd->state_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+ static void tb_xdomain_queue_properties_changed(struct tb_xdomain *xd)
+ {
+ 	xd->properties_changed_retries = XDOMAIN_RETRIES;
+-	queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->properties_changed_work,
+ 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+ }
+ 
+ static void tb_xdomain_failed(struct tb_xdomain *xd)
+ {
+ 	xd->state = XDOMAIN_STATE_ERROR;
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+@@ -1813,8 +1948,21 @@
+ 				goto retry_state;
+ 			tb_xdomain_failed(xd);
+ 		} else {
++			bool keepalive = state == XDOMAIN_STATE_ENUMERATED;
++
+ 			xd->state = XDOMAIN_STATE_ENUMERATED;
+-			tb_xdomain_queue_properties_changed(xd);
++			if (!keepalive)
++				tb_xdomain_queue_properties_changed(xd);
++			/*
++			 * Keep-alive: re-read peer properties periodically.
++			 * A wedged peer stops answering; the failure
++			 * streak then forces a link disconnect/retrain and
++			 * the pair recovers without operator action.
++			 * Suppressed notification avoids poking a healthy
++			 * peer into re-reading on every probe.
++			 */
++			queue_delayed_work(tb_xd_state_wq, &xd->state_work,
++					   msecs_to_jiffies(2500));
+ 		}
+ 		break;
+ 
+@@ -1823,8 +1971,21 @@
+ 		break;
+ 
+ 	case XDOMAIN_STATE_ERROR:
+-		dev_dbg(&xd->dev, "discovery failed, stopping handshake\n");
+-		__stop_handshake(xd);
++		/*
++		 * Stock behaviour stops here and relies on the peer to
++		 * re-request. When the peer is wedged (or also parked)
++		 * the pair deadlocks silently, so keep retrying instead.
++		 * This runs on the quarantine workqueue: the restart
++		 * issues synchronous requests that can, in a rare cancel
++		 * race, stall - contained to this queue by design.
++		 */
++		if (xd->is_unplugged || xd->removing) {
++			dev_dbg(&xd->dev, "discovery failed, stopping handshake\n");
++			__stop_handshake(xd);
++		} else {
++			dev_dbg(&xd->dev, "peer silent, restarting discovery\n");
++			tb_xdomain_queue_uuid(xd);
++		}
+ 		break;
+ 
+ 	default:
+@@ -1835,7 +1996,7 @@
+ 	return;
+ 
+ retry_state:
+-	queue_delayed_work(xd->tb->wq, &xd->state_work,
++	queue_delayed_work(tb_xd_state_wq, &xd->state_work,
+ 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ }
+ 
+@@ -1853,7 +2014,7 @@
+ 		if (xd->properties_changed_retries-- > 0) {
+ 			dev_dbg(&xd->dev,
+ 				"failed to send properties changed notification, retrying\n");
+-			queue_delayed_work(xd->tb->wq,
++			queue_delayed_work(tb_xd_state_wq,
+ 					   &xd->properties_changed_work,
+ 					   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+ 		}
+@@ -2755,6 +2916,12 @@
+ 	if (!xdomain_property_dir)
+ 		return -ENOMEM;
+ 
++	tb_xd_state_wq = alloc_ordered_workqueue("tb_xd_state", 0);
++	if (!tb_xd_state_wq) {
++		tb_property_free_dir(xdomain_property_dir);
++		return -ENOMEM;
++	}
++
+ 	/*
+ 	 * Initialize standard set of properties without any service
+ 	 * directories. Those will be added by service drivers
+@@ -2774,5 +2941,7 @@
+ 
+ void tb_xdomain_exit(void)
+ {
++	destroy_workqueue(tb_xd_state_wq);
++	tb_xd_state_wq = NULL;
+ 	tb_property_free_dir(xdomain_property_dir);
+ }

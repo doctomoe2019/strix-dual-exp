@@ -1,0 +1,11 @@
+[Unit]
+Description=TBSTREAM last-mile healer (network+streams after kernel self-heal)
+After=network.target
+
+[Service]
+ExecStart=/bin/bash /root/strix-dual-exp/scripts/heal-watch.sh %i
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

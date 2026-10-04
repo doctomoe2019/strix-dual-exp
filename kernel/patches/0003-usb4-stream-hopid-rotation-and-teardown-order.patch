@@ -1,0 +1,116 @@
+--- a/drivers/thunderbolt/stream.c	2026-10-03 11:34:54.651690394 +0200
++++ b/drivers/thunderbolt/stream.c	2026-10-04 14:36:02.558929159 +0200
+@@ -577,6 +577,53 @@
+ 	return tb_ring_tx(sdev->tx_ring.ring, &sf->frame);
+ }
+ 
++/*
++ * Rotate DMA ring HopIDs across sessions. Empirically, reusing the
++ * same HopID immediately after a heavy session raises the probability
++ * of the NHI control-plane wedge on teardown dramatically (with the
++ * stock lowest-free allocator, re-attach after a self-heal event
++ * wedged near-deterministically; with rotation, ~25% per restart).
++ * Rotation is a mitigation, not a cure — the wedge trigger is
++ * cable-end correlated (see docs/investigation-log.md).
++ */
++#define TBSTREAM_HOP_ROT_MIN	10
++#define TBSTREAM_HOP_ROT_MAX	31
++
++static atomic_t tbstream_hop_seq = ATOMIC_INIT(0);
++
++static struct tb_ring *tbstream_alloc_ring(struct tb_nhi *nhi, bool is_tx,
++					   unsigned int size, unsigned int flags,
++					   int e2e_tx_hop, u16 sof_mask,
++					   u16 eof_mask)
++{
++	struct tb_ring *ring;
++	int i, hop, hop_max;
++
++	/* Clamp to the NHI's actual HopID space: v2 hosts reject ring
++	 * HopIDs >= hop_count ("invalid hop"). */
++	hop_max = min_t(int, TBSTREAM_HOP_ROT_MAX, (int)nhi->hop_count - 1);
++
++	for (i = 0; i < hop_max - TBSTREAM_HOP_ROT_MIN + 1; i++) {
++		unsigned int seq = atomic_inc_return(&tbstream_hop_seq);
++		hop = TBSTREAM_HOP_ROT_MIN +
++		      seq % (hop_max - TBSTREAM_HOP_ROT_MIN + 1);
++		if (is_tx)
++			ring = tb_ring_alloc_tx(nhi, hop, size, flags);
++		else
++			ring = tb_ring_alloc_rx(nhi, hop, size, flags,
++						e2e_tx_hop, sof_mask, eof_mask,
++						NULL, NULL);
++		if (ring)
++			return ring;
++	}
++
++	/* Exhausted: fall back to automatic allocation. */
++	if (is_tx)
++		return tb_ring_alloc_tx(nhi, -1, size, flags);
++	return tb_ring_alloc_rx(nhi, -1, size, flags, e2e_tx_hop, sof_mask,
++				eof_mask, NULL, NULL);
++}
++
+ static int tbstream_dev_start(struct tbstream_dev *sdev)
+ {
+ 	struct tb_xdomain *xd = tbstream_dev_xdomain(sdev);
+@@ -588,7 +635,8 @@
+ 	if (sdev->busy_poll)
+ 		flags |= RING_FLAG_NO_INTERRUPT;
+ 
+-	ring = tb_ring_alloc_tx(xd->tb->nhi, -1, sdev->ring_size, flags);
++	ring = tbstream_alloc_ring(xd->tb->nhi, true, sdev->ring_size, flags,
++				   0, 0, 0);
+ 	if (!ring)
+ 		return -ENOMEM;
+ 	sdev->tx_ring.ring = ring;
+@@ -601,8 +649,8 @@
+ 	sof_mask = BIT(TBSTREAM_FRAME_START);
+ 	eof_mask = BIT(TBSTREAM_DATA) | BIT(TBSTREAM_CLOSE);
+ 
+-	ring = tb_ring_alloc_rx(xd->tb->nhi, -1, sdev->ring_size, flags,
+-				e2e_tx_hop, sof_mask, eof_mask, NULL, NULL);
++	ring = tbstream_alloc_ring(xd->tb->nhi, false, sdev->ring_size, flags,
++				   e2e_tx_hop, sof_mask, eof_mask);
+ 	if (!ring) {
+ 		ret = -ENOMEM;
+ 		goto err_free_tx_buffers;
+@@ -655,6 +703,23 @@
+ {
+ 	struct tb_xdomain *xd;
+ 
++	/*
++	 * Tear down the DMA paths before stopping the rings. The rings
++	 * must stay active while the paths are deactivated so that data
++	 * still in flight can drain: tb_ring_stop() zeroes the ring's
++	 * descriptor base and its cancellation callbacks unmap and free
++	 * the frame buffers, leaving nothing for pending path traffic to
++	 * drain to. This mirrors CVE-2026-74691 (thunderbolt-net) and
++	 * the matching dma_test fix.
++	 */
++	xd = tbstream_dev_xdomain(sdev);
++	if (xd) {
++		tb_xdomain_disable_paths(xd, sdev->out_hopid,
++					 sdev->tx_ring.ring->hop,
++					 sdev->in_hopid,
++					 sdev->rx_ring.ring->hop);
++	}
++
+ 	if (sdev->busy_poll) {
+ 		/*
+ 		 * When busy polling we must advance the ring ourselves
+@@ -678,14 +743,6 @@
+ 		tb_ring_stop(sdev->rx_ring.ring);
+ 	}
+ 
+-	xd = tbstream_dev_xdomain(sdev);
+-	if (xd) {
+-		tb_xdomain_disable_paths(xd, sdev->out_hopid,
+-					 sdev->tx_ring.ring->hop,
+-					 sdev->in_hopid,
+-					 sdev->rx_ring.ring->hop);
+-	}
+-
+ 	tbstream_ring_free(&sdev->rx_ring);
+ 	tb_ring_free(sdev->rx_ring.ring);
+ 	sdev->rx_ring.ring = NULL;

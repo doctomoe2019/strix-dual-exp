@@ -1,0 +1,4290 @@
+diff --git a/.devops/nix/package.nix b/.devops/nix/package.nix
+index 3c7b6d7..4b0ddf0 100644
+--- a/.devops/nix/package.nix
++++ b/.devops/nix/package.nix
+@@ -13,6 +13,7 @@
+   rocmPackages,
+   rdma-core ? null,
+   enableTp2Rdma ? false,
++  enableTp2Tbstream ? false,
+   releaseVersion ? null,
+   revision,
+ }:
+@@ -85,7 +86,8 @@ stdenv.mkDerivation {
+     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
+     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
+     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
+-  ] ++ lib.optionals enableTp2Rdma [ "-DGUFO_ENABLE_TP2_RDMA=ON" ];
++  ] ++ lib.optionals enableTp2Rdma [ "-DGUFO_ENABLE_TP2_RDMA=ON" ]
++  ++ lib.optionals enableTp2Tbstream [ "-DGUFO_ENABLE_TP2_TBSTREAM=ON" ];
+ 
+   doInstallCheck = true;
+   installCheckPhase = ''
+diff --git a/.devops/nix/scope.nix b/.devops/nix/scope.nix
+index cd2e2c3..7f464e4 100644
+--- a/.devops/nix/scope.nix
++++ b/.devops/nix/scope.nix
+@@ -13,5 +13,9 @@ lib.makeScope newScope (self: {
+     enableTp2Rdma = true;
+     rdma-core = pkgs.rdma-core;
+   };
++  tp2-tbstream = self.callPackage ./package.nix {
++    inherit releaseVersion revision;
++    enableTp2Tbstream = true;
++  };
+   mkServe = self.callPackage ./mk-serve.nix { };
+ })
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 11baf4f..efe2e8f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -232,6 +232,9 @@ target_link_libraries(gufo PRIVATE
+ if (GUFO_ENABLE_TP2_RDMA)
+   target_compile_definitions(gufo PRIVATE GUFO_ENABLE_TP2_RDMA=1)
+ endif()
++if (GUFO_ENABLE_TP2_TBSTREAM)
++  target_compile_definitions(gufo PRIVATE GUFO_ENABLE_TP2_TBSTREAM=1)
++endif()
+ target_compile_definitions(gufo PRIVATE
+   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
+   GUFO_REVISION="${GUFO_REVISION}"
+@@ -278,6 +281,15 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
+   target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
+ endif()
+ 
++if (GUFO_BUILD_TOOLS)
++  # Host-only USB4STREAM microbenchmark for the TP=2 tbstream transport; it
++  # needs no HIP and runs on any of the paired hosts.
++  add_executable(tbstream_probe tools/tbstream/tbstream_probe.cpp)
++  target_compile_features(tbstream_probe PRIVATE cxx_std_20)
++  find_package(Threads REQUIRED)
++  target_link_libraries(tbstream_probe PRIVATE Threads::Threads)
++endif()
++
+ install(TARGETS gufo DESTINATION bin)
+ install(FILES
+   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
+diff --git a/CMakePresets.json b/CMakePresets.json
+index 36721bb..17a6d8c 100644
+--- a/CMakePresets.json
++++ b/CMakePresets.json
+@@ -70,6 +70,15 @@
+       "cacheVariables": {
+         "GUFO_ENABLE_TP2_RDMA": "ON"
+       }
++    },
++    {
++      "name": "gpu-tp2-tbstream",
++      "displayName": "gfx1151 TP=2 USB4STREAM Tests",
++      "description": "GPU correctness build with the optional tbstream adapter",
++      "inherits": "gpu-test",
++      "cacheVariables": {
++        "GUFO_ENABLE_TP2_TBSTREAM": "ON"
++      }
+     }
+   ],
+   "buildPresets": [
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+index e817093..e34d1db 100644
+--- a/docs/DEVELOPMENT.md
++++ b/docs/DEVELOPMENT.md
+@@ -57,6 +57,7 @@ cmake --build --preset release --parallel 4
+ | `cpu-test` | RelWithDebInfo | Host-only tests, no HIP |
+ | `cpu-sanitizer` | Debug + ASan/UBSan | Host memory and undefined-behavior diagnostics |
+ | `gpu-tp2` | RelWithDebInfo + assertions | `gpu-test` plus the optional two-host RDMA adapter |
++| `gpu-tp2-tbstream` | RelWithDebInfo + assertions | `gpu-test` plus the optional two-host USB4STREAM adapter |
+ 
+ Build preset `pr` configures against `cpu-test` and runs the hosted contract
+ target `check-pr`. Test presets: `cpu-test` (label `cpu`), `cpu-sanitizer`,
+@@ -74,6 +75,7 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
+ | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
+ | `GUFO_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
+ | `GUFO_ENABLE_TP2_RDMA` | `OFF` | Two-host Qwen3.8 Flash-Next over InfiniBand RDMA; needs libibverbs and HIP ([TP2](models/qwen3.8-flash-next/TP2.md)) |
++| `GUFO_ENABLE_TP2_TBSTREAM` | `OFF` | Two-host Qwen3.8 Flash-Next over a USB4STREAM stream device; needs Linux 7.2+ and HIP ([TP2](models/qwen3.8-flash-next/TP2.md)) |
+ | `GUFO_RELEASE_VERSION` | `development` | Reported semantic release version |
+ | `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
+ | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
+diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
+index f895cc4..ae2b1b2 100644
+--- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
++++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
+@@ -106,3 +106,35 @@ Development measurements, not published cells.
+ | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
+ | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
+ | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
++
++## TP2 tbstream
++
++The same two hosts linked by a direct USB4 cable through the Linux
++USB4STREAM character device instead of the ConnectX-3 cards (see
++[TP2.md](TP2.md) and [tools/tbstream/README.md](../../../tools/tbstream/README.md)).
++Development measurements, not published cells. Kernel 7.2.6 mainline,
++`thunderbolt_stream` on both Strix Halo hosts, one stream named `gufo`,
++defaults (ring_size 256, throttling 8192) unless noted, measured
++2026-09-30/10-01. Final cable: a certified passive TB5 cable (Cable
++Matters B0CP8K1C59) training Gen3, 40 Gb/s each way; the earlier
++Gen2 (20 Gb/s each way) rows came from an uncertified active cable whose
++Gen3-max retimer and one identity-unreadable chip capped the link — see
++the cable qualification row.
++
++| Experiment | Decision / evidence |
++| --- | --- |
++| Exchange latency (decode shape) | **p50 22–23 µs, p99 34–42 µs** (`--mode exchange --bytes 10240 --frames 2000 --noverify`, Gen3 cable, reproduced three times: 23.4/22.9, 23.3/22.1) — **at parity with the RDMA baseline of 24 µs**. The transport itself checksums nothing (the GPU adds the partials directly, as verbs does), and the first reported figure of 43.7 µs turned out to be ~21 µs of the probe's own byte-at-a-time payload checksum; `--noverify` skips it (integrity stays covered by checksummed runs, which reproduce at the slower figure). |
++| Cable qualification | A USB-IF/Intel certified passive TB5 cable (Cable Matters B0CP8K1C59) trains **Gen3, 40 Gb/s each way, on hot plug** — no cold start — with a clean retimer chain (one identified board PS8830 per host, no cable retimers). The prior uncertified "80G" cable carried a Gen3-max PS8830 plus an identity-unreadable chip, trained Gen2, and correlated with the wedge-era instability. Recorded as the required cable class. |
++| One-way bandwidth (prefill shape) | **1.01–1.03 GB/s at 1 MiB, 1.04–1.05 at 5 MiB, 1.13–1.14 at 32 MiB** (`--noverify`, Gen3) — flat across frame sizes, so the pace is the driver's ring drain, not the frames. Without `--noverify` the receiver's checksum halves these to 0.5–0.7 GB/s, which masked the real figures through the Gen2/Gen3 comparison (both were checksum-bound, so the "link rate doubled, bandwidth did not move" observation holds but at the higher base). The sender idles at ~0% CPU; the remaining gap to RDMA's 3.27 GB/s is the drain path (interrupt-paced). A 5 MiB prefill exchange takes ~5 ms against RDMA's 1.9 ms. |
++| Latency/bandwidth trade-off | The stream's `throttling` knob batches the transmit path: at Gen2 (checksummed probe) default 8192 gave 43.6 µs / 0.50 GB/s versus ~110 µs / 0.77 GB/s at 65536. At Gen3 the tuned value gains nothing (0.48 vs 0.51, checksummed) — the host path saturates first — so serving keeps the default. Both figures predate `--noverify`; re-sweeps belong to the interrupt-throttle work. |
++| Ring capacity | `--mode exchange --bytes 33554432` (both ranks write their 32 MiB frame, then read) deadlocks both ends inside their write deadlines: no rank drains while the other writes. The transport's always-draining reader thread is required, not a refinement, for frames near or above the device's rings. |
++| Read-path requirement | Raw device experiments: a frame delivered while no reader is parked in a blocking `read(2)` is invisible to `poll(2)` and to nonblocking reads; a plain blocking read returns it at once, and an empty ring reads as zero bytes, not end of file. The transport therefore reads on a second, blocking descriptor (never closed; the reader is detached at stop), spins the exchange window before sleeping on empty reads, and keeps the nonblocking descriptor for deadline-bounded writes. |
++| Open-before-write ordering | Data a rank writes before its peer opened the device is stranded: the probe pairs a post-open barrier, and the transport's bootstrap readiness exchange plays that role after its reader starts. |
++| Driver robustness | External kills of a blocked writer wedge the stream (open then fails EIO, teardown hangs, and a wedged link flaps every ~55 s until the streams are removed); a clean exit through the write deadline does not. Recovery ladder: remove the stream on both ends, then PCI-rebind the controller, then reboot. Echo-mode (`--mode ping`) at 10 KiB still stalls after all fixes; the exchange and smoke patterns — the shapes the transport uses — are unaffected. |
++| Bandwidth plateau (root-caused) | Neither per-stream knob moves the ~1.1 GB/s plateau: `throttling` 0 and 65536, `ring_size` 256 and 1024 all measure 1.08–1.14 GB/s. Source reading of 7.2.6 found the real structure: the NHI ring descriptor's size field is 12 bits, so **every byte moves as ≤4 KiB frames, one descriptor each** (1.1 GB/s ≈ 270K frames/s), the stream rings use end-to-end flow control, and **RX buffers are reposted one at a time from the reader's `read()` syscall** (`tbstream_dev_consume_rx` in process context) with a per-frame `wake_up` — a latency-bound serial pipeline. Receiver measurements during a run agree: **~125K interrupts/s and no core above 20% busy** — not CPU-bound, not window-depth-bound (why `ring_size` changes nothing), paced by the per-frame interrupt→wake→copy→repost loop. Path credits (`dma_credits` ≤ router-reported 14) may bound the ceiling further up, but the software pipeline binds first. The L1T 78 Gb/s custom-driver claim is the existence proof that the fabric itself goes far faster with bigger logical transfers and kernel-side repost. |
++| Transport survey (2026-10-02) | Alternatives measured on the same pair/cable: **thunderbolt-net** (in-kernel IP over USB4, MTU 9000, `pm_qos_resume_latency_us=100` which drops ping RTT from ~600 µs to **117 µs**): iperf3 one-way **9.27 Gbit/s (1.16 GB/s)**, no parallel-stream scaling, bidirectional **31.7 Gbit/s aggregate** (RX rail reached 21.2 Gbit/s). So the per-direction IP ceiling ≈ tbstream's 1.13-1.16 GB/s on AMD↔AMD; the fabric itself exceeds it when driven bidirectionally. **hellas-ai/thunderbolt-ibverbs** (RDMA-over-USB4, claims ~48 Gb/s/dir 4-HCA + 7 µs latency) was built (v0.3.4+2449afd, kernel 7.2.6) and brought up: native rail handshake completes, `usb4_rdma{0,5}` register, GIDs populate via `roce_netdev=thunderbolt0`, but every RC WRITE stalls partially-delivered (sender retransmit loop `reason=1 tx_pending=0`, receiver discards ~96% of the first WRITE at QP teardown) at all sizes 4 KiB-1 MiB — an upstream data-path bug on our AMD↔AMD single-cable pair; issue drafted at `/root/tbv-issue.md` with both hosts' dmesg. The stock tbstream module stays in service; the patched stream module remains parked at `/root/tb-stream-module/` (parity, no gain, launch-order sensitive). |
++| thunderbolt-ibverbs root-caused + fixed (2026-10-02) | The zero-completions failure was a **mixed-E2E bug**: `tbv_native_e2e_auto_enabled()` returns true when `xd->tb` is unresolved at rail creation, so one host's path got E2E rings (`tx_flags=0x6`) while the peer's stayed non-E2E (`0x2`) — visible as differing `path_cfg` lines in debugfs `peers`. The E2E host's TX ring then posts descriptors that never transmit (its ACKs cannot return), stalling every RC WRITE. **Fix: `native_e2e=0` on both hosts** (no code). Measured on our pair: ib_write_lat **8.2/9.2 µs min/avg at 2 B, 15/16.3 µs at 10 KiB** (vs tbstream 22 µs RTT); ib_write_bw **1095 MiB/s sustained at 64 KiB**, 734 MiB/s at 1 MiB (software-retry tax: ~8% data-frame loss without E2E). Upstream issue with root cause + measurements drafted at `/root/tbv-issue.md`. Symmetric `native_e2e=1` wedges on this NHI (as their comment warns) — software-credit mode is the AMD answer. |
++| gufo over usb4_rdma (2026-10-02 capstone) | **End-to-end TP2 serving works**: gufo `tp2-rdma` rebuilt against their `rdma-core-usb4` (two one-line link-layer relaxations in verbs.cpp — the transport assumed InfiniBand link layer; the device reports Ethernet/RoCE), both ranks load, pair, and generate **correct output** over verbs-on-USB4 (`--tp-transport rdma --tp-device 0 --tp-gid-index 1`). Performance is not competitive yet: MTP decode **38.6 tok/s vs 76.1 over tbstream** (96% draft acceptance), because their transport's RPC-unfriendly flow control shows up under gufo's exchange pattern: ~8x frame amplification from whole-message retransmits (retry timeout ~75 ms) plus 230K `data_tx_credit_stalls` (start-of-message credit reservation of 32 frames/message drains the 768-credit window under queued exchanges). perftest over the same device: 16 µs @10 KiB, 1095 MiB/s @64 KiB — the verbs path is sound; the credit/retransmit tuning needs upstream work (or a second-rail striping setup) before it can serve. tbstream stays the production transport. |
++| TP2 tbstream two-host serving (2026-10-01) | First end-to-end serving on the local pair (both Strix Halo, kernel 7.2.6, Gen3 link, Q4_K_XL + MTP Q8): `tp_probe` two-host decode produces **identical text on both ranks**, and `--split 40` prefill is bit-stable on each rank (96/96 observations, no differences, logits max_abs_diff 0; world-1 reference 48/48). Serving smoke (4 sessions, context 65536, disk cache off): model load ~16 s per rank (~48-51 GB GPU memory per rank), TTFT 482 ms at 65-token prompt, **MTP decode 76.1 tok/s steady state** (draft 344, accepted 321 = 93%), **prefill 1159.7 tok/s** at a 3293-token prompt. Decode is compute-bound (13 ms/token vs ~23 µs per exchange); prefill is the exchange-heavy phase where the 1.1 GB/s transport plateau lands. Same flake package (`.#tp2-tbstream`) built on host 1 and copied as a closure to host 2 (local `nix-store --export \| --import` around signature enforcement); weights shipped over the 1 GbE LAN at 112 MB/s. |
++| Multi-stream striping (blocked) | The configfs interface allows a second stream per peer (`stream/<router>.1/<name>`), and a second `/dev/tbstream1` appears on both hosts — but **no second DMA tunnel ever forms**: auto HopIDs stay `-1/-1` in both creation orders and manual values (9/9) are accepted without a path appearing (debugfs port path dump unchanged while writing). The first stream's tunnel works every time. Multi-stream on one cable is therefore blocked on the 7.2.6 driver — added to the upstream report list. Throughput scaling must come from kernel-side repost batching or a second cable. |
++| Serving | Pending: the `gpu-tp2-tbstream` build and the two-host qualifying checklist on this pair. |
+diff --git a/docs/models/qwen3.8-flash-next/TP2.md b/docs/models/qwen3.8-flash-next/TP2.md
+index e43d0eb..bfad9fb 100644
+--- a/docs/models/qwen3.8-flash-next/TP2.md
++++ b/docs/models/qwen3.8-flash-next/TP2.md
+@@ -1,10 +1,13 @@
+ # Qwen3.8-Flash-Next TP=2
+ 
+-Two-host tensor-parallel serving over InfiniBand RDMA. It serves Q4 and full
+-Q8, AR and MTP, images, concurrent requests and history reuse. It needs
+-libibverbs and the build option `GUFO_ENABLE_TP2_RDMA` (off by default). Its
+-measurements are in [EXPERIMENTS.md](EXPERIMENTS.md#tp2), not in the published
+-one-host tables.
++Two-host tensor-parallel serving over a point-to-point transport. Two are
++built: native InfiniBand RDMA, and a USB4STREAM (`tbstream`) character
++device over a direct USB4/Thunderbolt cable. Both serve Q4 and full
++Q8, AR and MTP, images, concurrent requests and history reuse. RDMA needs
++libibverbs and the build option `GUFO_ENABLE_TP2_RDMA`; tbstream needs
++Linux 7.2+ with a configured stream device and the build option
++`GUFO_ENABLE_TP2_TBSTREAM` (both off by default). The measurements are in
++[EXPERIMENTS.md](EXPERIMENTS.md#tp2), not in the published one-host tables.
+ 
+ ## Build
+ 
+@@ -15,6 +18,9 @@ nix develop --inputs-from .#tp2-rdma -c cmake --build --preset gpu-tp2 --target
+ # Release binary with TP2
+ cmake --preset release -DGUFO_ENABLE_TP2_RDMA=ON
+ cmake --build --preset release --parallel 4
++
++# USB4STREAM transport instead (Nix: nix develop --inputs-from .#tp2-tbstream)
++cmake --preset release -DGUFO_ENABLE_TP2_TBSTREAM=ON
+ ```
+ 
+ ## Run
+@@ -37,6 +43,21 @@ build/gpu-tp2/gufo serve llm --model "$MODEL" --speculative mtp --mtp-model "$MT
+   --tp-control-token SHARED_TOKEN --sessions 4
+ ```
+ 
++`--tp-transport` picks the data transport, `rdma` (default) or `tbstream`;
++both ranks must agree or the transport bootstrap refuses the pair. With
++`tbstream`, the USB4STREAM stream must already exist on both hosts (see
++[tools/tbstream/README.md](../../../tools/tbstream/README.md)) and
++`--tp-tbstream-dev` names its device (default `/dev/tbstream0`):
++
++```sh
++# Both hosts, before the ranks start:
++sudo tools/tbstream/setup-stream.sh check
++sudo tools/tbstream/setup-stream.sh up
++
++# Then the same serve commands as above, plus on both ranks:
++#   --tp-transport tbstream
++```
++
+ Sampling, streaming, stop sequences, tool calls, images (`--mmproj` on both
+ ranks), cancellation, `--request-timeout-ms`, history reuse and the disk cache
+ (`--cache-disk` on both ranks, each on its own disk) work as on one host.
+@@ -84,6 +105,25 @@ batches a layer apart (one batch under 384 tokens), so each batch's exchange
+ crosses the link while the other computes; the results equal two steps of
+ those sizes bit for bit.
+ 
++**Transports.** Both transports implement the same `Communicator` exchange:
++stage the partial into a send window, move one framed record per exchange
++(header plus partial, into the peer's next rotating receive window), and
++let the GPU add the peer's partial straight from its window. RDMA does this
++with one write-with-immediate, whose completion is the arrival signal.
++`tbstream` replaces the network stack with the USB4STREAM character device
++of a Linux 7.2+ `thunderbolt_stream` driver: the device is an ordered byte
++stream in both directions, so a background thread writes each frame while
++a reader thread, always draining, places the peer's frame of the same
++exchange into the window and raises the arrival flag. The reader owns every
++read because a rank writes its frame before reading the peer's; without it,
++two ranks whose frames exceed the device's rings could each block writing
++into the other's full receive ring. The framed records, rotating windows,
++scope and ordinal checks, staged ready/arrived flags and GPU wait kernels
++are the verbs transport's, unchanged. The bootstrap socket stays open under
++the same liveness rule: readable means the peer is gone. A lost stream or a
++pulled cable surfaces as a read or write deadline within the collective
++timeout.
++
+ **Rank 1 as executor.** Rank 0 runs the ordinary scheduler, runner pool and
+ continuation cache through `TpMirroredRunner`. Just before each call that
+ changes model state, it sends the call to rank 1 over an authenticated TCP
+@@ -137,17 +177,26 @@ request's states and snapshots are not reused.
+   rank 1 with a toy model, for every request kind, divergence and reuse rule.
+ - `qwen38_flash_next.tp_partition` and the attention, projection and routed
+   operator tests: the split against the full kernels.
+-- `qwen38_flash_next_tp_probe` (`gpu-tp2`): prompt, decode and logit
+-  comparison on both ranks; `--split N` checks that a prefill does not depend
+-  on its steps (every layer's MoE input and output, and the logits, bit for
+-  bit), `--decode-tail K` compares decoding the last K tokens with
+-  prefilling them.
+-- `qwen38_flash_next_tp_batched_probe` (`gpu-tp2`): batched against serial
+-  decoding on both ranks without the serving stack; `--allreduce-bench N`
+-  times the exchange.
++- `qwen38_flash_next_tp_probe` (`gpu-tp2`, `gpu-tp2-tbstream`): prompt,
++  decode and logit comparison on both ranks, over either transport
++  (`--tp-transport rdma|tbstream`, `--tp-tbstream-dev PATH`);
++  `--split N` checks that a prefill does not depend on its steps (every
++  layer's MoE input and output, and the logits, bit for bit),
++  `--decode-tail K` compares decoding the last K tokens with prefilling
++  them.
++- `qwen38_flash_next_tp_batched_probe` (`gpu-tp2`, `gpu-tp2-tbstream`):
++  batched against serial decoding on both ranks without the serving stack,
++  over either transport; `--allreduce-bench N` times the exchange.
++- `tools/tbstream/tbstream_probe` (`GUFO_BUILD_TOOLS`, host-only): link
++  qualification for the tbstream transport; see
++  [tools/tbstream/README.md](../../../tools/tbstream/README.md).
+ - `tools/bench/model-bench.py` launches both ranks through a `gufo.tp2`
+   overlay in `bench.json` (`remote_host`, `bootstrap_host`, ports, token,
+   container and binary); it runs single-user tables only.
++- Qualifying the tbstream transport additionally needs the link gates in
++  [tools/tbstream/README.md](../../../tools/tbstream/README.md) passed on
++  the pair, and the qualification steps below rerun with
++  `--tp-transport tbstream`.
+ 
+ ## Qualifying a change
+ 
+diff --git a/flake.nix b/flake.nix
+index f8ceb0a..19c60c7 100644
+--- a/flake.nix
++++ b/flake.nix
+@@ -129,6 +129,7 @@
+         {
+           default = base;
+           tp2-rdma = gufoPackages.${system}.tp2-rdma;
++          tp2-tbstream = gufoPackages.${system}.tp2-tbstream;
+           # Official artifacts select this output from a tagged source. The
+           # default package remains visibly developmental on moving branches.
+           release = base.override { inherit releaseVersion; };
+@@ -168,6 +169,10 @@
+             inputsFrom = [ self.packages.${system}.tp2-rdma ];
+             packages = [ pkgs.${system}.clang-tools ];
+           };
++          tp2-tbstream = pkgs.${system}.mkShell {
++            inputsFrom = [ self.packages.${system}.tp2-tbstream ];
++            packages = [ pkgs.${system}.clang-tools ];
++          };
+         }
+       );
+ 
+diff --git a/src/cli/serve/serve.cpp b/src/cli/serve/serve.cpp
+index effbce6..7f403b1 100644
+--- a/src/cli/serve/serve.cpp
++++ b/src/cli/serve/serve.cpp
+@@ -45,6 +45,9 @@
+ #ifdef GUFO_ENABLE_TP2_RDMA
+ #include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
+ #endif
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
++#endif
+ #include "src/cli/serve/tts_service.hpp"
+ #include "src/cli/serve/video_jobs.hpp"
+ #include "src/cli/video/video.hpp"
+@@ -563,6 +566,8 @@ void PrintServeHelp(std::string_view program_name,
+     std::uint32_t tp_control_port = 18516;
+     std::string tp_bootstrap_host;
+     std::string tp_control_token;
++    std::string tp_transport = "rdma";
++    std::string tp_tbstream_device = "/dev/tbstream0";
+     bool log_progress = false;
+ 
+     gufo::cli::ArgParser parser(
+@@ -602,6 +607,12 @@ void PrintServeHelp(std::string_view program_name,
+                      &tp_device);
+     parser.AddOption("", "--tp-gid-index", "N", "InfiniBand GID index", "TP2",
+                      &tp_gid_index);
++    parser.AddOption("", "--tp-transport", "rdma|tbstream",
++                     "TP2 data transport (default: rdma)", "TP2",
++                     &tp_transport);
++    parser.AddOption("", "--tp-tbstream-dev", "PATH",
++                     "USB4STREAM character device (default: /dev/tbstream0)",
++                     "TP2", &tp_tbstream_device);
+ 
+     // Sampling Defaults
+     parser.AddOption(
+@@ -1087,6 +1098,8 @@ int RunServe(std::span<const char* const> args) {
+     std::uint32_t tp_control_port = 18516;
+     std::string tp_bootstrap_host;
+     std::string tp_control_token;
++    std::string tp_transport = "rdma";
++    std::string tp_tbstream_device = "/dev/tbstream0";
+     bool log_progress = false;
+ 
+     gufo::cli::ArgParser llm_parser(
+@@ -1126,6 +1139,13 @@ int RunServe(std::span<const char* const> args) {
+                          &tp_device);
+     llm_parser.AddOption("", "--tp-gid-index", "N", "InfiniBand GID index",
+                          "TP2", &tp_gid_index);
++    llm_parser.AddOption("", "--tp-transport", "rdma|tbstream",
++                         "TP2 data transport (default: rdma)", "TP2",
++                         &tp_transport);
++    llm_parser.AddOption(
++        "", "--tp-tbstream-dev", "PATH",
++        "USB4STREAM character device (default: /dev/tbstream0)", "TP2",
++        &tp_tbstream_device);
+     llm_parser.AddOption(
+         "-n", "--max-tokens", "N",
+         "Default new-token limit (default: -1 = until EOS or context full)",
+@@ -1329,6 +1349,14 @@ int RunServe(std::span<const char* const> args) {
+       std::cerr << "Error: invalid TP2 network/device options\n";
+       return 2;
+     }
++    if (tp_transport != "rdma" && tp_transport != "tbstream") {
++      std::cerr << "Error: --tp-transport must be rdma or tbstream\n";
++      return 2;
++    }
++    if (tp_tbstream_device.empty()) {
++      std::cerr << "Error: --tp-tbstream-dev must not be empty\n";
++      return 2;
++    }
+     if (tp_world_size == 2 &&
+         (tp_control_token.empty() || tp_control_token.size() > 4096)) {
+       std::cerr << "Error: TP2 requires --tp-control-token\n";
+@@ -1355,22 +1383,46 @@ int RunServe(std::span<const char* const> args) {
+       (void)::sigaction(SIGINT, &stop, nullptr);
+     }
+     if (tp_world_size == 2) {
+-#ifdef GUFO_ENABLE_TP2_RDMA
+-      const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
+-          .rank = tp_rank,
+-          .world_size = tp_world_size,
+-          .bootstrap_host = tp_bootstrap_host,
+-          .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
+-          .device_index = tp_device,
+-          .gid_index = tp_gid_index,
+-      };
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
+       std::string tp_error;
+-      tp_communicator =
+-          models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
+-              rdma_config, &tp_error);
++      if (tp_transport == "tbstream") {
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++        const models::qwen38_flash_next::rocm::TbstreamConfig tbstream_config{
++            .rank = tp_rank,
++            .world_size = tp_world_size,
++            .bootstrap_host = tp_bootstrap_host,
++            .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
++            .device_index = tp_device,
++            .device_path = tp_tbstream_device,
++        };
++        tp_communicator =
++            models::qwen38_flash_next::rocm::CreateTbstreamCommunicator(
++                tbstream_config, &tp_error);
++#else
++        std::cerr << "Error: this build has no TP2 tbstream support\n";
++        return 2;
++#endif
++      } else {
++#ifdef GUFO_ENABLE_TP2_RDMA
++        const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
++            .rank = tp_rank,
++            .world_size = tp_world_size,
++            .bootstrap_host = tp_bootstrap_host,
++            .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
++            .device_index = tp_device,
++            .gid_index = tp_gid_index,
++        };
++        tp_communicator =
++            models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
++                rdma_config, &tp_error);
++#else
++        std::cerr << "Error: this build has no TP2 RDMA support\n";
++        return 2;
++#endif
++      }
+       if (!tp_communicator) {
+-        std::cerr << "Error creating TP2 RDMA communicator: " << tp_error
+-                  << '\n';
++        std::cerr << "Error creating the TP2 " << tp_transport
++                  << " communicator: " << tp_error << '\n';
+         return 1;
+       }
+       tp_control =
+@@ -1386,7 +1438,7 @@ int RunServe(std::span<const char* const> args) {
+         return 1;
+       }
+ #else
+-      std::cerr << "Error: this build has no TP2 RDMA support\n";
++      std::cerr << "Error: this build has no TP2 RDMA or tbstream support\n";
+       return 2;
+ #endif
+     }
+@@ -1498,9 +1550,13 @@ int RunServe(std::span<const char* const> args) {
+     return 1;
+   }
+   // Rank 0 of a TP2 pair whose peer or link is gone fails every request, so
+-  // it exits for a supervisor to restart both ranks; rank 1 exits on its own.
++  // it stops for a supervisor to restart both ranks; rank 1 exits on its own.
+   // Requests that already failed get a moment to deliver their errors. The
+-  // exit skips teardown, which could wait on an exchange the peer never ends.
++  // stop goes through the normal SIGTERM path so the transport teardown runs
++  // (quiesce + orderly closes); a hard exit here skipped that teardown and
++  // reliably wedged the tbstream control plane on the strix pair whenever it
++  // was the second rank to close against an already-dead peer. A delayed
++  // hard exit backstops a teardown that cannot complete against a dead peer.
+   std::atomic<bool> serving{true};
+   std::thread pair_watch;
+   if (tp_rank_zero) {
+@@ -1512,10 +1568,15 @@ int RunServe(std::span<const char* const> args) {
+           continue;
+         }
+         server::Logger::Error(
+-            "server", "event=tp_pair_lost action=exit reason=" + failure);
++            "server",
++            "event=tp_pair_lost action=graceful_exit reason=" + failure);
+         std::this_thread::sleep_for(std::chrono::seconds(1));
+         std::cerr.flush();
+         std::fflush(nullptr);
++        ::kill(::getpid(), SIGTERM);
++        std::this_thread::sleep_for(std::chrono::seconds(15));
++        server::Logger::Error(
++            "server", "event=tp_pair_lost action=exit reason=graceful-exit-timeout");
+         std::_Exit(1);
+       }
+     });
+diff --git a/src/models/qwen38_flash_next/CMakeLists.txt b/src/models/qwen38_flash_next/CMakeLists.txt
+index 495dd3f..0c8554a 100644
+--- a/src/models/qwen38_flash_next/CMakeLists.txt
++++ b/src/models/qwen38_flash_next/CMakeLists.txt
+@@ -2,6 +2,8 @@
+ # only by explicit validation targets, not by production or routine checks.
+ option(GUFO_ENABLE_TP2_RDMA
+   "Build the Qwen3.8-Flash-Next TP=2 native RDMA adapter" OFF)
++option(GUFO_ENABLE_TP2_TBSTREAM
++  "Build the Qwen3.8-Flash-Next TP=2 USB4STREAM (tbstream) adapter" OFF)
+ 
+ add_library(gufo_qwen38_flash_next STATIC
+   config.cpp
+@@ -32,6 +34,24 @@ if (GUFO_ENABLE_TP2_RDMA)
+     GUFO_ENABLE_TP2_RDMA=1)
+ endif()
+ 
++if (GUFO_ENABLE_TP2_TBSTREAM)
++  if (NOT ENGINE_ENABLE_HIP)
++    message(FATAL_ERROR
++      "GUFO_ENABLE_TP2_TBSTREAM requires ENGINE_ENABLE_HIP")
++  endif()
++  add_library(gufo_qwen38_flash_next_tbstream STATIC
++    kernels/rocm/tbstream.cpp)
++  target_compile_features(gufo_qwen38_flash_next_tbstream PRIVATE cxx_std_20)
++  target_include_directories(gufo_qwen38_flash_next_tbstream PRIVATE
++    ${PROJECT_SOURCE_DIR})
++  target_link_libraries(gufo_qwen38_flash_next_tbstream PRIVATE
++    Threads::Threads ${CMAKE_DL_LIBS} hip::host)
++  target_link_libraries(gufo_qwen38_flash_next PRIVATE
++    gufo_qwen38_flash_next_tbstream)
++  target_compile_definitions(gufo_qwen38_flash_next PUBLIC
++    GUFO_ENABLE_TP2_TBSTREAM=1)
++endif()
++
+ add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
+   cpu_ops.cpp reference.cpp)
+ target_link_libraries(gufo_qwen38_flash_next_reference PUBLIC
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
+index 3f55af4..a29ac82 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
+@@ -9,6 +9,46 @@
+ 
+ namespace gufo::models::qwen38_flash_next::rocm {
+ 
++/// Wire representation of a tbstream exchange payload. f32 is the original
++/// byte-for-byte form; f16 and q8 trade precision for link bytes (2x and
++/// ~3.76x respectively) on large frames. Both ranks must agree, which the
++/// tbstream bootstrap handshake enforces.
++enum class TbstreamWire : std::uint8_t {
++  kF32 = 0,
++  kF16 = 1,
++  kQ8 = 2,
++};
++
++/// Bytes the wire carries for an f32 payload of `fp32_bytes` elements-bytes
++/// in `wire`. q8 packs per-32-element blocks: an fp16 scale array first
++/// (16-byte aligned) then the int8 data. Pure function: both ranks derive
++/// frame sizes from the same inputs.
++[[nodiscard]] constexpr std::size_t TbstreamWireBytes(
++    std::size_t fp32_bytes, TbstreamWire wire) noexcept {
++  const std::size_t count = fp32_bytes / sizeof(float);
++  switch (wire) {
++    case TbstreamWire::kF32:
++      return fp32_bytes;
++    case TbstreamWire::kF16:
++      return count * sizeof(std::uint16_t);
++    case TbstreamWire::kQ8: {
++      const std::size_t scales = ((count + 31) / 32) * sizeof(std::uint16_t);
++      const std::size_t aligned = (scales + 15) & ~std::size_t{15};
++      return aligned + count;
++    }
++  }
++  return fp32_bytes;
++}
++
++/// Offset of the int8 data inside a q8 payload (the aligned scales array
++/// precedes it). Only valid for q8 payloads.
++[[nodiscard]] constexpr std::size_t TbstreamQ8DataOffset(
++    std::size_t fp32_bytes) noexcept {
++  const std::size_t count = fp32_bytes / sizeof(float);
++  const std::size_t scales = ((count + 31) / 32) * sizeof(std::uint16_t);
++  return (scales + 15) & ~std::size_t{15};
++}
++
+ /// Ordered communication boundary used by the model executor. A two-rank sum
+ /// is one `ExchangePartial` followed by adding the returned peer partial to
+ /// this rank's partial on the GPU. Each rank adds local plus peer, and float
+@@ -35,8 +75,10 @@ public:
+   /// null on failure. Every exchange must use the same stream, and the add
+   /// that reads the peer's partial must be queued on it before the second
+   /// exchange after this one starts: that exchange reuses the buffer.
++  /// `wire` (optional out) reports the peer partial's representation.
+   [[nodiscard]] virtual const float* ExchangePartial(const float* data,
+                                                      std::size_t bytes,
++                                                     TbstreamWire* wire,
+                                                      hipStream_t stream,
+                                                      std::string* error) = 0;
+   /// The overlapped form of `ExchangePartial`, so the GPU computes other rows
+@@ -49,8 +91,10 @@ public:
+   [[nodiscard]] virtual bool StartPartial(const float* data, std::size_t bytes,
+                                           hipStream_t stream,
+                                           std::string* error) = 0;
+-  [[nodiscard]] virtual const float* FinishPartial(std::size_t bytes,
+-                                                   std::string* error) = 0;
++  /// `wire` reports the representation the returned peer partial uses, so
++  /// the caller can dequantize while adding (f32 payloads report kF32).
++  [[nodiscard]] virtual const float* FinishPartial(
++      std::size_t bytes, TbstreamWire* wire, std::string* error) = 0;
+ 
+   /// The GPU's half of a queued exchange (QueuePartial). Queue on the stream,
+   /// in this order: copy the partial to `send` and then publish `value` in
+@@ -67,6 +111,9 @@ public:
+     std::uint32_t* arrivals{nullptr};  ///< StagePartial's block counter
+     std::uint32_t* timed_out{nullptr};
+     std::uint64_t wait_ticks{0};
++    /// The wire representation of `send`/`peer` for this exchange; the
++    /// staged bytes and the peer add must use the matching kernels.
++    TbstreamWire wire{TbstreamWire::kF32};
+   };
+   /// Queues an exchange of `bytes` without blocking the caller: a background
+   /// thread sends this rank's partial once the stream publishes it and
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+index e939746..2d34af2 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+@@ -1564,14 +1564,46 @@ Executor::TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
+     if (!communicator->QueuePartial(bytes, &queued, error)) {
+       return false;
+     }
+-    StagePartial(data, queued.send, bytes / sizeof(float), queued.arrivals,
+-                 queued.ready, queued.value, stream);
++    const std::size_t count = bytes / sizeof(float);
++    switch (queued.wire) {
++      case TbstreamWire::kF32:
++        StagePartial(data, queued.send, count, queued.arrivals, queued.ready,
++                     queued.value, stream);
++        break;
++      case TbstreamWire::kF16:
++        StagePartialF16(data, reinterpret_cast<__half*>(queued.send), count,
++                        queued.arrivals, queued.ready, queued.value, stream);
++        break;
++      case TbstreamWire::kQ8:
++        StagePartialQ8(data, reinterpret_cast<__half*>(queued.send),
++                       reinterpret_cast<std::int8_t*>(queued.send) +
++                           TbstreamQ8DataOffset(bytes),
++                       count, queued.arrivals, queued.ready, queued.value,
++                       stream);
++        break;
++    }
+     WaitValue(queued.arrived, queued.value, queued.wait_ticks, queued.timed_out,
+               stream);
+     const std::size_t rows = bytes / (sizeof(float) * hidden);
+     if (rows != 0) {
+-      AddRowsBroadcast(queued.peer, data, static_cast<std::uint32_t>(rows),
+-                       hidden, 1, stream);
++      switch (queued.wire) {
++        case TbstreamWire::kF32:
++          AddRowsBroadcast(queued.peer, data, static_cast<std::uint32_t>(rows),
++                           hidden, 1, stream);
++          break;
++        case TbstreamWire::kF16:
++          AddRowsBroadcastF16(reinterpret_cast<const __half*>(queued.peer),
++                              data, static_cast<std::uint32_t>(rows), hidden,
++                              stream);
++          break;
++        case TbstreamWire::kQ8:
++          AddRowsBroadcastQ8(
++              reinterpret_cast<const __half*>(queued.peer),
++              reinterpret_cast<const std::int8_t*>(queued.peer) +
++                  TbstreamQ8DataOffset(bytes),
++              data, static_cast<std::uint32_t>(rows), hidden, stream);
++          break;
++      }
+     }
+     return true;
+   };
+@@ -1599,14 +1631,31 @@ Executor::SplitReduce Executor::TwoRankSplitReduce(
+   reduce.finish = [communicator = std::move(communicator), hidden](
+                       float* data, std::size_t bytes, hipStream_t stream,
+                       std::string* error) {
+-    const float* peer = communicator->FinishPartial(bytes, error);
++    TbstreamWire wire = TbstreamWire::kF32;
++    const float* peer = communicator->FinishPartial(bytes, &wire, error);
+     if (peer == nullptr) {
+       return false;
+     }
+     const std::size_t rows = bytes / (sizeof(float) * hidden);
+     if (rows != 0) {
+-      AddRowsBroadcast(peer, data, static_cast<std::uint32_t>(rows), hidden, 1,
+-                       stream);
++      switch (wire) {
++        case TbstreamWire::kF32:
++          AddRowsBroadcast(peer, data, static_cast<std::uint32_t>(rows),
++                           hidden, 1, stream);
++          break;
++        case TbstreamWire::kF16:
++          AddRowsBroadcastF16(reinterpret_cast<const __half*>(peer), data,
++                              static_cast<std::uint32_t>(rows), hidden,
++                              stream);
++          break;
++        case TbstreamWire::kQ8:
++          AddRowsBroadcastQ8(
++              reinterpret_cast<const __half*>(peer),
++              reinterpret_cast<const std::int8_t*>(peer) +
++                  TbstreamQ8DataOffset(bytes),
++              data, static_cast<std::uint32_t>(rows), hidden, stream);
++          break;
++      }
+     }
+     return true;
+   };
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
+index d68388c..201e152 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
+@@ -2574,6 +2574,33 @@ __global__ void AddRowsBroadcastKernel(const float* addend, float* residual,
+   }
+ }
+ 
++/// The peer's partial arrived as fp16 on the wire: convert while adding.
++__global__ void AddRowsBroadcastF16Kernel(const __half* addend,
++                                          float* residual,
++                                          std::uint32_t hidden) {
++  const std::uint32_t t = blockIdx.x;
++  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
++    residual[static_cast<std::size_t>(t) * hidden + i] +=
++        __half2float(addend[static_cast<std::size_t>(t) * hidden + i]);
++  }
++}
++
++/// The peer's partial arrived as q8 blocks: dequantize while adding. Block
++/// b covers elements [32b, 32b+32) with the fp16 scale at scales[b]; the
++/// int8 data starts at `data` (already past the scales array).
++__global__ void AddRowsBroadcastQ8Kernel(const __half* scales,
++                                         const std::int8_t* data,
++                                         float* residual,
++                                         std::uint32_t hidden) {
++  const std::uint32_t t = blockIdx.x;
++  const std::size_t row = static_cast<std::size_t>(t) * hidden;
++  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
++    const std::size_t e = row + i;
++    residual[e] += __half2float(scales[e >> 5]) *
++                   static_cast<float>(data[e]);
++  }
++}
++
+ // Every thread's copies reach the system scope before its block is counted;
+ // the last block to finish publishes `value`, so the host that reads it also
+ // sees the whole partial.
+@@ -2605,6 +2632,88 @@ __global__ void StagePartialKernel(const float* __restrict__ partial,
+   }
+ }
+ 
++/// Publishes `value` in `ready` once this block's staged writes are visible
++/// system-wide; shared by the quantizing stage kernels below.
++__device__ __forceinline__ void StagePublish(std::uint32_t* arrivals,
++                                             std::uint64_t* ready,
++                                             std::uint64_t value) {
++  __threadfence_system();
++  __syncthreads();
++  if (threadIdx.x == 0 && __hip_atomic_fetch_add(arrivals, 1u, __ATOMIC_ACQ_REL,
++                                                 __HIP_MEMORY_SCOPE_SYSTEM) +
++                                  1 ==
++                              gridDim.x) {
++    __hip_atomic_store(arrivals, 0u, __ATOMIC_RELAXED,
++                       __HIP_MEMORY_SCOPE_SYSTEM);
++    __hip_atomic_store(ready, value, __ATOMIC_RELEASE,
++                       __HIP_MEMORY_SCOPE_SYSTEM);
++  }
++}
++
++/// fp16-on-the-wire staging: same protocol as StagePartialKernel, but the
++/// payload is converted to __half (values beyond the fp16 range saturate to
++/// inf, which surfaces as NaN downstream — callers keep f32 for frames
++/// where that risk matters, enforced by the communicator's size gate).
++__global__ void StagePartialF16Kernel(const float* __restrict__ partial,
++                                      __half* __restrict__ send,
++                                      std::size_t count,
++                                      std::uint32_t* arrivals,
++                                      std::uint64_t* ready,
++                                      std::uint64_t value) {
++  const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
++  const std::size_t first =
++      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
++  const std::size_t pairs = count / 2;
++  for (std::size_t i = first; i < pairs; i += stride) {
++    const float2 v =
++        reinterpret_cast<const float2*>(partial)[i];
++    reinterpret_cast<__half2*>(send)[i] = __float22half2_rn(v);
++  }
++  if ((count & 1) != 0 && first == 0) {
++    send[count - 1] = __float2half(partial[count - 1]);
++  }
++  StagePublish(arrivals, ready, value);
++}
++
++/// q8-on-the-wire staging: one warp owns each 32-element block, computes the
++/// block's fp16 scale from its max magnitude, and writes int8 quotients at
++/// `data` (the payload's scales array precedes it, 16-byte aligned).
++__global__ void StagePartialQ8Kernel(const float* __restrict__ partial,
++                                     __half* __restrict__ scales,
++                                     std::int8_t* __restrict__ data,
++                                     std::size_t count, std::size_t blocks,
++                                     std::uint32_t* arrivals,
++                                     std::uint64_t* ready,
++                                     std::uint64_t value) {
++  const unsigned warps_per_block = blockDim.x >> 5;
++  const unsigned lane = threadIdx.x & 31u;
++  const unsigned warp = threadIdx.x >> 5;
++  const std::size_t warps_total =
++      static_cast<std::size_t>(gridDim.x) * warps_per_block;
++  const std::size_t first_warp =
++      static_cast<std::size_t>(blockIdx.x) * warps_per_block + warp;
++  for (std::size_t b = first_warp; b < blocks; b += warps_total) {
++    const std::size_t base = b * 32;
++    const bool active = base + lane < count;
++    const float v = active ? partial[base + lane] : 0.0f;
++    const float magnitude = __builtin_fabsf(v);
++    float max = magnitude;
++    for (unsigned off = 16; off > 0; off >>= 1) {
++      max = fmaxf(max, __shfl_xor(max, off));
++    }
++    const __half scale = __float2half_rn(max == 0.0f ? 1.0f : max / 127.0f);
++    if (active) {
++      const float q = rintf(v / __half2float(scale));
++      data[base + lane] = static_cast<std::int8_t>(
++          q > 127.0f ? 127.0f : (q < -127.0f ? -127.0f : q));
++    }
++    if (lane == 0) {
++      scales[b] = scale;
++    }
++  }
++  StagePublish(arrivals, ready, value);
++}
++
+ __global__ void WaitValueKernel(const std::uint64_t* flag, std::uint64_t value,
+                                 std::uint64_t ticks, std::uint32_t* timed_out) {
+   const std::uint64_t start = wall_clock64();
+@@ -5989,6 +6098,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
+                      stream, addend, residual, hidden, streams);
+ }
+ 
++void AddRowsBroadcastF16(const __half* addend, float* residual,
++                         std::uint32_t n_tokens, std::uint32_t hidden,
++                         hipStream_t stream) {
++  hipLaunchKernelGGL(AddRowsBroadcastF16Kernel, dim3(n_tokens), dim3(kThreads),
++                     0, stream, addend, residual, hidden);
++}
++
++void AddRowsBroadcastQ8(const __half* scales, const std::int8_t* data,
++                        float* residual, std::uint32_t n_tokens,
++                        std::uint32_t hidden, hipStream_t stream) {
++  hipLaunchKernelGGL(AddRowsBroadcastQ8Kernel, dim3(n_tokens), dim3(kThreads),
++                     0, stream, scales, data, residual, hidden);
++}
++
+ void StagePartial(const float* partial, float* send, std::size_t count,
+                   std::uint32_t* arrivals, std::uint64_t* ready,
+                   std::uint64_t value, hipStream_t stream) {
+@@ -5999,6 +6122,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+                      stream, partial, send, count, arrivals, ready, value);
+ }
+ 
++void StagePartialF16(const float* partial, __half* send, std::size_t count,
++                     std::uint32_t* arrivals, std::uint64_t* ready,
++                     std::uint64_t value, hipStream_t stream) {
++  const std::size_t threads = std::max<std::size_t>(1, count / 2);
++  const auto blocks = static_cast<unsigned>(
++      std::min<std::size_t>(1024, (threads + kThreads - 1) / kThreads));
++  hipLaunchKernelGGL(StagePartialF16Kernel, dim3(blocks), dim3(kThreads), 0,
++                     stream, partial, send, count, arrivals, ready, value);
++}
++
++void StagePartialQ8(const float* partial, __half* scales, std::int8_t* data,
++                    std::size_t count, std::uint32_t* arrivals,
++                    std::uint64_t* ready, std::uint64_t value,
++                    hipStream_t stream) {
++  const std::size_t blocks_needed = (count + 31) / 32;
++  // 256-thread blocks = 8 warps; one warp per 32-element block.
++  const auto blocks = static_cast<unsigned>(std::min<std::size_t>(
++      1024, (blocks_needed + 7) / 8));
++  hipLaunchKernelGGL(StagePartialQ8Kernel, dim3(blocks), dim3(256), 0, stream,
++                     partial, scales, data, count, blocks_needed, arrivals,
++                     ready, value);
++}
++
+ void WaitValue(const std::uint64_t* flag, std::uint64_t value,
+                std::uint64_t ticks, std::uint32_t* timed_out,
+                hipStream_t stream) {
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
+index 077933d..86ce5c4 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
+@@ -466,6 +466,17 @@ void AddRowsBroadcast(const float* addend, float* residual,
+                       std::uint32_t n_tokens, std::uint32_t hidden,
+                       std::uint32_t streams, hipStream_t stream);
+ 
++/// Wire-quantized variants of the TP all-reduce add: the peer's partial
++/// arrived as fp16 (`AddRowsBroadcastF16`) or as q8 blocks — an fp16 scale
++/// per 32 elements followed by int8 data (`AddRowsBroadcastQ8`) — and is
++/// dequantized while being added, `streams` = 1 shapes only.
++void AddRowsBroadcastF16(const __half* addend, float* residual,
++                         std::uint32_t n_tokens, std::uint32_t hidden,
++                         hipStream_t stream);
++void AddRowsBroadcastQ8(const __half* scales, const std::int8_t* data,
++                        float* residual, std::uint32_t n_tokens,
++                        std::uint32_t hidden, hipStream_t stream);
++
+ /// Copies `count` floats of a partial into a host-visible send window, then
+ /// publishes `value` in `ready` once every block's copy is visible to the
+ /// host. `arrivals` counts finished blocks and must start at zero; the last
+@@ -474,6 +485,18 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+                   std::uint32_t* arrivals, std::uint64_t* ready,
+                   std::uint64_t value, hipStream_t stream);
+ 
++/// Wire-quantized staging variants with the same publish protocol:
++/// `StagePartialF16` writes __half values; `StagePartialQ8` writes the q8
++/// block layout — the fp16 scale array at `scales`, int8 quotients at
++/// `data` (the caller places both inside the payload window).
++void StagePartialF16(const float* partial, __half* send, std::size_t count,
++                     std::uint32_t* arrivals, std::uint64_t* ready,
++                     std::uint64_t value, hipStream_t stream);
++void StagePartialQ8(const float* partial, __half* scales, std::int8_t* data,
++                    std::size_t count, std::uint32_t* arrivals,
++                    std::uint64_t* ready, std::uint64_t value,
++                    hipStream_t stream);
++
+ /// Holds the stream until host-written `flag` reaches `value`. After `ticks`
+ /// of the device wall clock it sets `timed_out` and lets the stream go on.
+ void WaitValue(const std::uint64_t* flag, std::uint64_t value,
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
+new file mode 100644
+index 0000000..c973c08
+--- /dev/null
++++ b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
+@@ -0,0 +1,1591 @@
++#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
++
++#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
++
++#include <hip/hip_fp16.h>
++
++#include <fcntl.h>
++#include <netdb.h>
++#include <netinet/tcp.h>
++#include <poll.h>
++#include <sched.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cerrno>
++#include <chrono>
++#include <condition_variable>
++#include <cstdio>
++#include <cstring>
++#include <ctime>
++#include <deque>
++#include <limits>
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <pthread.h>
++#include <string>
++#include <system_error>
++#include <thread>
++#include <utility>
++
++namespace gufo::models::qwen38_flash_next::rocm {
++namespace {
++
++constexpr std::uint32_t kTbstreamWireMagic = 0x47555453U;  // "GUTS"
++constexpr std::uint32_t kTbstreamWireVersion = 1;
++constexpr std::uint32_t kCollectiveMagic = 0x47554348U;  // "GUCH"
++constexpr std::uint32_t kCollectiveVersion = 5;
++constexpr std::uint32_t kReadyMagic = 0x47555244U;  // "GURD"
++// The same rotating windows the verbs transport uses: three, because the add
++// reading an overlapped exchange's partial may still be queued when the
++// exchange after the next one lands (see Communicator), and a queued
++// exchange's partial is staged while the previous one is in flight. A frame
++// starts with the writer's header; the partial follows at kDataOffset.
++constexpr std::size_t kWindowBytes = 32U << 20;
++constexpr std::size_t kWindows = 3;
++constexpr std::size_t kBufferBytes = kWindows * kWindowBytes;
++constexpr std::size_t kDataOffset = 64;
++// Overlapped exchanges started and not yet finished; each has its own
++// readiness event.
++constexpr std::size_t kStartedExchanges = 4;
++// Queued exchanges not yet complete; a forward queues one per layer.
++constexpr std::size_t kQueuedExchanges = 4096;
++// A GPU wait gives up well after the exchange thread's own timeout.
++constexpr std::uint64_t kWaitSeconds = 120;
++// Flag words, a cache line apart: written by the GPU, by the host, and by a
++// GPU wait that timed out.
++constexpr std::size_t kReadyOffset = 0;
++constexpr std::size_t kArrivedOffset = 64;
++constexpr std::size_t kTimedOutOffset = 128;
++constexpr std::size_t kFlagBytes = 4096;
++constexpr auto kCollectiveTimeout = std::chrono::seconds(30);
++constexpr auto kReceiveSpinWindow = std::chrono::microseconds(500);
++// An exchange waits for a layer of GPU work, or a peer that is a layer behind:
++// spinning that long keeps the wake-up latency off every decode exchange.
++constexpr auto kExchangeSpinWindow = std::chrono::milliseconds(5);
++// Frames smaller than this stay f32 on the wire: decode-shaped exchanges are
++// latency-bound (bytes do not move the needle) and keep the exact path, so
++// quantization only ever applies to the bandwidth-bound prefill batches.
++constexpr std::size_t kQuantizeMinBytes = 256 * 1024;
++
++// Eases a spin loop off the core's shared resources and the SoC power budget,
++// which the GPU draws from too.
++inline void CpuRelax() noexcept {
++#if defined(__x86_64__) || defined(__i386__)
++  __builtin_ia32_pause();
++#endif
++}
++
++/// Pins the calling thread to `cpu` (a negative index counts from the top
++/// of the process's affinity mask), so the reader and the exchange worker
++/// never migrate under load. Failures are ignored: pinning is a latency
++/// refinement, not a correctness requirement.
++void PinToCpuFromTop(int cpu_from_top) {
++  cpu_set_t allowed;
++  CPU_ZERO(&allowed);
++  if (::sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
++    return;
++  }
++  int chosen = -1;
++  for (int cpu = CPU_SETSIZE - 1; cpu >= 0 && cpu_from_top >= 0; --cpu) {
++    if (CPU_ISSET(cpu, &allowed) && cpu_from_top-- == 0) {
++      chosen = cpu;
++      break;
++    }
++  }
++  if (chosen >= 0) {
++    cpu_set_t pinned;
++    CPU_ZERO(&pinned);
++    CPU_SET(chosen, &pinned);
++    (void)::sched_setaffinity(0, sizeof(pinned), &pinned);
++  }
++}
++
++void SetError(std::string* error_msg, std::string message) {
++  if (error_msg != nullptr) {
++    *error_msg = std::move(message);
++  }
++}
++
++std::string SystemError(const char* operation) {
++  return std::string(operation) + ": " + std::strerror(errno);
++}
++
++/// A blocking-exchange failure the reader thread reports to waiters without
++/// taking the communicator lock: the reason is a static string, so a waiter
++/// holding the lock in the synchronous exchange path can still name it.
++enum class ReaderFailure : std::uintptr_t {
++  kPeerLost = 1,
++  kStreamRead = 2,
++  kStreamClosed = 3,
++  kHeader = 4,
++  kTimeout = 5,
++};
++
++const char* ReaderFailureText(void* failure) {
++  switch (
++      static_cast<ReaderFailure>(reinterpret_cast<std::uintptr_t>(failure))) {
++    case ReaderFailure::kPeerLost:
++      return "tbstream peer closed the bootstrap connection";
++    case ReaderFailure::kStreamRead:
++      return "tbstream device read failed";
++    case ReaderFailure::kStreamClosed:
++      return "tbstream device returned end of stream";
++    case ReaderFailure::kHeader:
++      return "tbstream collective identity or size mismatch";
++    case ReaderFailure::kTimeout:
++      return "tbstream timed out waiting for the peer's frame";
++  }
++  return "tbstream reader failed";
++}
++
++class Socket {
++public:
++  Socket() = default;
++  explicit Socket(int fd) : fd_(fd) {}
++  Socket(const Socket&) = delete;
++  Socket& operator=(const Socket&) = delete;
++  Socket(Socket&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
++  Socket& operator=(Socket&& other) noexcept {
++    if (this != &other) {
++      Close();
++      fd_ = std::exchange(other.fd_, -1);
++    }
++    return *this;
++  }
++  ~Socket() { Close(); }
++
++  [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
++  [[nodiscard]] int fd() const noexcept { return fd_; }
++
++  void Close() noexcept {
++    if (fd_ >= 0) {
++      ::close(fd_);
++      fd_ = -1;
++    }
++  }
++
++  [[nodiscard]] static Socket Listen(const std::string& host,
++                                     std::uint16_t port, std::string* error) {
++    struct addrinfo hints{};
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_STREAM;
++    hints.ai_flags = AI_PASSIVE;
++    const std::string service = std::to_string(port);
++    struct addrinfo* addresses = nullptr;
++    const int result = ::getaddrinfo(host.empty() ? nullptr : host.c_str(),
++                                     service.c_str(), &hints, &addresses);
++    if (result != 0) {
++      SetError(error,
++               "bootstrap getaddrinfo: " + std::string(::gai_strerror(result)));
++      return {};
++    }
++    int fd = -1;
++    for (auto* address = addresses; address != nullptr;
++         address = address->ai_next) {
++      fd = ::socket(address->ai_family, address->ai_socktype,
++                    address->ai_protocol);
++      if (fd < 0) {
++        continue;
++      }
++      int reuse = 1;
++      (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
++      if (::bind(fd, address->ai_addr, address->ai_addrlen) == 0 &&
++          ::listen(fd, 1) == 0) {
++        break;
++      }
++      ::close(fd);
++      fd = -1;
++    }
++    ::freeaddrinfo(addresses);
++    if (fd < 0) {
++      SetError(error, SystemError("bootstrap listen"));
++      return {};
++    }
++    SetTimeouts(fd);
++    pollfd poll_fd{.fd = fd, .events = POLLIN, .revents = 0};
++    const int poll_result = ::poll(&poll_fd, 1, 30000);
++    if (poll_result <= 0) {
++      SetError(error, poll_result == 0 ? "bootstrap accept timed out"
++                                       : SystemError("bootstrap poll"));
++      ::close(fd);
++      return {};
++    }
++    int peer = -1;
++    do {
++      peer = ::accept(fd, nullptr, nullptr);
++    } while (peer < 0 && errno == EINTR);
++    if (peer < 0) {
++      SetError(error, SystemError("bootstrap accept"));
++      ::close(fd);
++      return {};
++    }
++    Socket listener(fd);
++    SetTimeouts(peer);
++    return Socket(peer);
++  }
++
++  [[nodiscard]] static Socket Connect(const std::string& host,
++                                      std::uint16_t port, std::string* error) {
++    if (host.empty()) {
++      SetError(error, "rank one requires a bootstrap host");
++      return {};
++    }
++    const auto deadline = std::chrono::steady_clock::now() + kCollectiveTimeout;
++    for (;;) {
++      struct addrinfo hints{};
++      hints.ai_family = AF_INET;
++      hints.ai_socktype = SOCK_STREAM;
++      const std::string service = std::to_string(port);
++      struct addrinfo* addresses = nullptr;
++      const int result =
++          ::getaddrinfo(host.c_str(), service.c_str(), &hints, &addresses);
++      if (result != 0) {
++        SetError(error, "bootstrap getaddrinfo: " +
++                            std::string(::gai_strerror(result)));
++        return {};
++      }
++      int fd = -1;
++      for (auto* address = addresses; address != nullptr;
++           address = address->ai_next) {
++        fd = ::socket(address->ai_family, address->ai_socktype,
++                      address->ai_protocol);
++        if (fd < 0) {
++          continue;
++        }
++        const int flags = ::fcntl(fd, F_GETFL, 0);
++        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
++          ::close(fd);
++          fd = -1;
++          continue;
++        }
++        bool connected =
++            ::connect(fd, address->ai_addr, address->ai_addrlen) == 0;
++        if (!connected && errno == EINPROGRESS) {
++          pollfd poll_fd{.fd = fd, .events = POLLOUT, .revents = 0};
++          const int poll_result = ::poll(&poll_fd, 1, 1000);
++          int socket_error = 0;
++          socklen_t error_size = sizeof(socket_error);
++          connected = poll_result > 0 &&
++                      ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
++                                   &error_size) == 0 &&
++                      socket_error == 0;
++        }
++        if (connected) {
++          if (::fcntl(fd, F_SETFL, flags) != 0) {
++            ::close(fd);
++            fd = -1;
++            continue;
++          }
++          break;
++        }
++        ::close(fd);
++        fd = -1;
++      }
++      ::freeaddrinfo(addresses);
++      if (fd >= 0) {
++        SetTimeouts(fd);
++        return Socket(fd);
++      }
++      if (std::chrono::steady_clock::now() >= deadline) {
++        SetError(error, SystemError("bootstrap connect"));
++        return {};
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    }
++  }
++
++  [[nodiscard]] bool SendAll(const void* data, std::size_t bytes,
++                             std::string* error) const {
++    const auto* cursor = static_cast<const std::uint8_t*>(data);
++    std::size_t sent = 0;
++    while (sent < bytes) {
++      const ssize_t n = ::send(fd_, cursor + sent, bytes - sent, MSG_NOSIGNAL);
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n <= 0) {
++        SetError(error, SystemError("bootstrap send"));
++        return false;
++      }
++      sent += static_cast<std::size_t>(n);
++    }
++    return true;
++  }
++
++  [[nodiscard]] bool RecvAll(void* data, std::size_t bytes,
++                             std::string* error) const {
++    auto* cursor = static_cast<std::uint8_t*>(data);
++    std::size_t received = 0;
++    // A collective peer usually answers within a few hundred microseconds.
++    // Polling that long avoids the scheduler wake-up a blocking receive pays
++    // on every exchange; a slower peer falls back to the blocking receive.
++    const auto spin_deadline =
++        std::chrono::steady_clock::now() + kReceiveSpinWindow;
++    while (received < bytes) {
++      const bool spinning = std::chrono::steady_clock::now() < spin_deadline;
++      const ssize_t n = ::recv(fd_, cursor + received, bytes - received,
++                               spinning ? MSG_DONTWAIT : 0);
++      if (n < 0 && spinning && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        continue;
++      }
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n <= 0) {
++        SetError(error, SystemError("bootstrap receive"));
++        return false;
++      }
++      received += static_cast<std::size_t>(n);
++    }
++    return true;
++  }
++
++private:
++  static void SetTimeouts(int fd) noexcept {
++    struct timeval timeout{};
++    timeout.tv_sec = 30;
++    timeout.tv_usec = 0;
++    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++    (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
++    const int no_delay = 1;
++    (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay,
++                       sizeof(no_delay));
++  }
++
++  int fd_{-1};
++};
++
++struct Wire {
++  std::uint32_t magic{kTbstreamWireMagic};
++  std::uint32_t version{kTbstreamWireVersion};
++  std::uint32_t rank{0};
++  std::uint32_t world_size{0};
++  std::uint64_t window_bytes{0};
++  std::uint64_t windows{0};
++  std::uint64_t data_offset{0};
++  /// TbstreamWire value both ranks agreed on (env must match).
++  std::uint8_t wire{static_cast<std::uint8_t>(TbstreamWire::kF32)};
++};
++
++struct CollectiveHeader {
++  std::uint32_t magic{kCollectiveMagic};
++  std::uint32_t version{kCollectiveVersion};
++  std::uint64_t scope_id{0};
++  std::uint64_t operation_id{0};
++  std::uint64_t bytes{0};
++};
++
++static_assert(sizeof(CollectiveHeader) <= kDataOffset);
++
++class Tbstream final : public Communicator {
++public:
++  explicit Tbstream(const TbstreamConfig& config) : config_(config) {}
++  ~Tbstream() override { Cleanup(); }
++
++  Tbstream(const Tbstream&) = delete;
++  Tbstream& operator=(const Tbstream&) = delete;
++
++  [[nodiscard]] bool Initialize(std::string* error) {
++    if (config_.world_size != 2 || config_.rank > 1 ||
++        config_.bootstrap_port == 0 || config_.device_path.empty() ||
++        config_.device_index >
++            static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
++      SetError(error,
++               "tbstream communicator requires two ranks, a bootstrap port "
++               "and a stream device");
++      return false;
++    }
++    if (hipSetDevice(static_cast<int>(config_.device_index)) != hipSuccess) {
++      SetError(error, "hipSetDevice for tbstream communicator failed");
++      return false;
++    }
++    // A nonblocking device keeps every write under a deadline: a frame whose
++    // peer vanished mid-cable must fail within the collective timeout, not
++    // block in write(2) forever.
++    // Optional wire quantization: GUFO_TBSTREAM_WIRE selects the payload
++    // representation for large frames — f32 (default, exact), f16 (2x fewer
++    // link bytes) or q8 (per-32-element blocks with fp16 scales, ~3.76x
++    // fewer). Frames below kQuantizeMinBytes always stay f32. Both ranks
++    // must export the same value; the handshake below rejects a mismatch.
++    if (const char* wire_env = ::getenv("GUFO_TBSTREAM_WIRE")) {
++      const std::string_view choice(wire_env);
++      if (choice == "f16") {
++        wire_ = TbstreamWire::kF16;
++      } else if (choice == "q8") {
++        wire_ = TbstreamWire::kQ8;
++      } else if (choice != "f32") {
++        SetError(error, "GUFO_TBSTREAM_WIRE must be f32, f16 or q8");
++        return false;
++      }
++    }
++    // Optional TX pacing: GUFO_TBSTREAM_TX_PACING_US pauses that many
++    // microseconds per MiB inside a large frame write. Sustained
++    // back-to-back large lock-step exchanges (prefill sweeps at 20-80 MiB)
++    // leave both NHIs straining at teardown: hop deactivation then times out
++    // reading the config space and the next tunnel activation fails until a
++    // stream teardown cycle (or reboot). A small per-MiB breath lets the
++    // peer's RX repost path keep up. 0 disables; ~25 works (costs ~9% of
++    // peak write bandwidth on 20 MiB frames).
++    if (const char* pacing_env =
++            ::getenv("GUFO_TBSTREAM_TX_PACING_US")) {
++      char* end = nullptr;
++      const long parsed = ::strtol(pacing_env, &end, 10);
++      if (end != pacing_env && parsed >= 0 &&
++          parsed <= std::numeric_limits<long>::max() / 2) {
++        tx_pacing_us_ = static_cast<std::uint32_t>(parsed);
++      }
++    }
++    fd_ = ::open(config_.device_path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    if (fd_ < 0) {
++      SetError(error, "open " + config_.device_path + ": " +
++                          std::string(std::strerror(errno)) +
++                          " (is the USB4STREAM stream configured? see "
++                          "docs/models/qwen3.8-flash-next/TP2.md)");
++      return false;
++    }
++    // The reader's own descriptor stays blocking: this driver's nonblocking
++    // read path reports no data (and its poll mask stays quiet) for frames
++    // that arrive while no reader is parked in read(2), so a deadline-driven
++    // poll loop would starve. A blocking read returns the moment the frame
++    // arrives; waiters carry the collective timeout instead.
++    read_fd_ = ::open(config_.device_path.c_str(), O_RDWR | O_CLOEXEC);
++    if (read_fd_ < 0) {
++      SetError(error, "open " + config_.device_path +
++                          " for reading: " + std::string(std::strerror(errno)));
++      return false;
++    }
++    struct stat device_stat{};
++    if (::fstat(fd_, &device_stat) != 0 || !S_ISCHR(device_stat.st_mode)) {
++      SetError(error, config_.device_path + " is not a character device");
++      return false;
++    }
++    // The peer's frame is copied by this process into the receive windows and
++    // the GPU adds it straight from there, so both buffers are host memory
++    // the device maps, coherent like the flags: the reader thread stores the
++    // peer's partial and the GPU reads it without an invalidation, as the
++    // verbs transport reads the NIC's DMA through its registered mapping.
++    if (hipHostMalloc(&send_buffer_, kBufferBytes,
++                      hipHostMallocMapped | hipHostMallocCoherent) !=
++            hipSuccess ||
++        hipHostMalloc(&recv_buffer_, kBufferBytes,
++                      hipHostMallocMapped | hipHostMallocCoherent) !=
++            hipSuccess) {
++      SetError(error, "tbstream exchange window allocation failed");
++      return false;
++    }
++    if (hipHostGetDevicePointer(&send_device_, send_buffer_, 0) != hipSuccess ||
++        send_device_ == nullptr ||
++        hipHostGetDevicePointer(&recv_device_, recv_buffer_, 0) != hipSuccess ||
++        recv_device_ == nullptr) {
++      SetError(error, "exchange windows have no device mapping");
++      return false;
++    }
++    if (hipHostMalloc(&flags_, kFlagBytes,
++                      hipHostMallocMapped | hipHostMallocCoherent) !=
++            hipSuccess ||
++        hipHostGetDevicePointer(&flags_device_, flags_, 0) != hipSuccess ||
++        hipMalloc(&arrivals_, sizeof(std::uint32_t)) != hipSuccess ||
++        hipMemset(arrivals_, 0, sizeof(std::uint32_t)) != hipSuccess) {
++      SetError(error, "exchange flag allocation failed");
++      return false;
++    }
++    std::memset(flags_, 0, kFlagBytes);
++    int clock_khz = 0;
++    if (hipDeviceGetAttribute(&clock_khz, hipDeviceAttributeWallClockRate,
++                              static_cast<int>(config_.device_index)) !=
++            hipSuccess ||
++        clock_khz <= 0) {
++      SetError(error, "device wall clock rate is unknown");
++      return false;
++    }
++    wait_ticks_ = static_cast<std::uint64_t>(clock_khz) * 1000 * kWaitSeconds;
++
++    const Wire local{
++        .rank = config_.rank,
++        .world_size = config_.world_size,
++        .window_bytes = kWindowBytes,
++        .windows = kWindows,
++        .data_offset = kDataOffset,
++        .wire = static_cast<std::uint8_t>(wire_),
++    };
++    Socket control = config_.rank == 0
++                         ? Socket::Listen(config_.bootstrap_host,
++                                          config_.bootstrap_port, error)
++                         : Socket::Connect(config_.bootstrap_host,
++                                           config_.bootstrap_port, error);
++    if (!control.valid()) {
++      return false;
++    }
++    if (!control.SendAll(&local, sizeof(local), error)) {
++      return false;
++    }
++    Wire remote{};
++    if (!control.RecvAll(&remote, sizeof(remote), error)) {
++      return false;
++    }
++    if (remote.magic != kTbstreamWireMagic ||
++        remote.version != kTbstreamWireVersion ||
++        remote.world_size != config_.world_size ||
++        remote.rank != 1U - config_.rank ||
++        remote.window_bytes != kWindowBytes || remote.windows != kWindows ||
++        remote.data_offset != kDataOffset ||
++        remote.wire != static_cast<std::uint8_t>(wire_)) {
++      SetError(error,
++               "tbstream bootstrap metadata is invalid (check that both "
++               "ranks use the same --tp-transport and the same "
++               "GUFO_TBSTREAM_WIRE)");
++      return false;
++    }
++    try {
++      reader_ = std::thread([this] {
++        PinToCpuFromTop(1);
++        Read();
++      });
++      reader_started_ = true;
++    } catch (const std::system_error&) {
++      SetError(error, "tbstream reader thread creation failed");
++      return false;
++    }
++    const std::uint32_t ready = kReadyMagic;
++    std::uint32_t peer_ready = 0;
++    if (!control.SendAll(&ready, sizeof(ready), error) ||
++        !control.RecvAll(&peer_ready, sizeof(peer_ready), error) ||
++        peer_ready != kReadyMagic) {
++      SetError(error, "tbstream readiness exchange failed");
++      return false;
++    }
++    control_ = std::make_unique<Socket>(std::move(control));
++    return true;
++  }
++
++  [[nodiscard]] std::uint32_t rank() const noexcept override {
++    return config_.rank;
++  }
++  [[nodiscard]] std::uint32_t world_size() const noexcept override {
++    return config_.world_size;
++  }
++  [[nodiscard]] int device_index() const noexcept override {
++    return static_cast<int>(config_.device_index);
++  }
++
++  [[nodiscard]] bool BeginOperation(std::uint64_t scope_id,
++                                    std::string* error) override {
++    std::lock_guard lock(mutex_);
++    if (fd_ < 0 || control_ == nullptr) {
++      SetError(error, "tbstream communicator is not initialized");
++      return false;
++    }
++    if (poisoned_) {
++      PoisonedError(error);
++      return false;
++    }
++    if (bound_scope_.has_value()) {
++      Poison(error, "another tbstream operation scope is already bound");
++      return false;
++    }
++    bound_scope_ = scope_id;
++    return true;
++  }
++
++  [[nodiscard]] bool EndOperation(std::uint64_t scope_id,
++                                  std::string* error) override {
++    std::lock_guard lock(mutex_);
++    if (poisoned_) {
++      PoisonedError(error);
++      return false;
++    }
++    if (!bound_scope_.has_value()) {
++      SetError(error, "tbstream operation scope is not bound");
++      return false;
++    }
++    if (*bound_scope_ != scope_id) {
++      Poison(error, "tbstream operation scope end mismatch: bound=" +
++                        std::to_string(*bound_scope_) +
++                        " requested=" + std::to_string(scope_id));
++      return false;
++    }
++    if (started_ != 0 || queued_ != 0) {
++      Poison(error, "tbstream operation scope ended with exchanges in flight");
++      return false;
++    }
++    bound_scope_.reset();
++    return true;
++  }
++
++  [[nodiscard]] const float* ExchangePartial(const float* data,
++                                             std::size_t bytes,
++                                             TbstreamWire* wire,
++                                             hipStream_t stream,
++                                             std::string* error) override {
++    std::lock_guard lock(mutex_);
++    if (!CheckExchange(data, bytes, error)) {
++      return nullptr;
++    }
++    if (started_ != 0 || queued_ != 0) {
++      Poison(error, "tbstream exchange started with overlapped ones in flight");
++      return nullptr;
++    }
++    const TbstreamWire exchange_wire = WireFor(bytes);
++    // Synchronizing retires this rank's adds of earlier exchanges, whose
++    // windows the peer's next frames reuse.
++    if (bytes != 0 &&
++        (hipStreamSynchronize(stream) != hipSuccess ||
++         !StageIntoWindow(SendWindow(next_operation_), data, bytes,
++                          exchange_wire, next_operation_, stream) ||
++         hipStreamSynchronize(stream) != hipSuccess)) {
++      Poison(error, "HIP device-to-host all-reduce staging failed");
++      return nullptr;
++    }
++    const std::uint64_t operation_id = next_operation_;
++    Expect({.scope_id = *bound_scope_,
++            .operation_id = operation_id,
++            .bytes = TbstreamWireBytes(bytes, exchange_wire),
++            .queued = false});
++    std::string transfer_error;
++    if (!WriteFrame(*bound_scope_, operation_id,
++                    TbstreamWireBytes(bytes, exchange_wire),
++                    &transfer_error)) {
++      Poison(error, std::move(transfer_error));
++      return nullptr;
++    }
++    if (!WaitArrival(operation_id, &transfer_error)) {
++      Poison(error, std::move(transfer_error));
++      return nullptr;
++    }
++    ++next_operation_;
++    if (wire != nullptr) {
++      *wire = exchange_wire;
++    }
++    return RecvWindow(operation_id);
++  }
++
++  [[nodiscard]] bool StartPartial(const float* data, std::size_t bytes,
++                                  hipStream_t stream,
++                                  std::string* error) override {
++    std::lock_guard lock(mutex_);
++    if (!CheckExchange(data, bytes, error)) {
++      return false;
++    }
++    if (started_ == kStartedExchanges) {
++      Poison(error, "too many overlapped tbstream exchanges in flight");
++      return false;
++    }
++    if (std::string worker_error; !StartWorker(&worker_error)) {
++      Poison(error, std::move(worker_error));
++      return false;
++    }
++    // At most kStartedExchanges are in flight, so the exchange that last used
++    // this event has finished and the worker no longer waits on it.
++    const std::uint64_t operation_id = next_operation_;
++    hipEvent_t ready = ready_events_[operation_id % kStartedExchanges];
++    if (hipEventRecord(ready, stream) != hipSuccess) {
++      Poison(error, "overlapped exchange event record failed");
++      return false;
++    }
++    const TbstreamWire exchange_wire = WireFor(bytes);
++    Expect({.scope_id = *bound_scope_,
++            .operation_id = operation_id,
++            .bytes = TbstreamWireBytes(bytes, exchange_wire),
++            .queued = false});
++    {
++      std::lock_guard jobs(jobs_mutex_);
++      jobs_.push_back({.ready = ready,
++                       .data = data,
++                       .bytes = TbstreamWireBytes(bytes, exchange_wire),
++                       .fp32_bytes = bytes,
++                       .scope_id = *bound_scope_,
++                       .operation_id = operation_id,
++                       .wire = exchange_wire});
++    }
++    ++next_operation_;
++    ++started_;
++    jobs_ready_.notify_one();
++    return true;
++  }
++
++  [[nodiscard]] const float* FinishPartial(std::size_t bytes,
++                                           TbstreamWire* wire,
++                                           std::string* error) override {
++    {
++      std::lock_guard lock(mutex_);
++      if (started_ == 0) {
++        Poison(error, "no overlapped tbstream exchange is in flight");
++        return nullptr;
++      }
++    }
++    Finished finished;
++    {
++      std::unique_lock jobs(jobs_mutex_);
++      finished_ready_.wait(jobs, [this] { return !finished_.empty(); });
++      finished = std::move(finished_.front());
++      finished_.pop_front();
++    }
++    std::lock_guard lock(mutex_);
++    --started_;
++    // `bytes` is the f32 payload size the caller staged; the frame carried
++    // its wire representation.
++    if (finished.peer != nullptr &&
++        finished.bytes != TbstreamWireBytes(bytes, finished.wire)) {
++      finished.peer = nullptr;
++      finished.error = "overlapped tbstream exchange size mismatch";
++    }
++    if (finished.peer == nullptr) {
++      Poison(error, finished.error);
++      return nullptr;
++    }
++    if (wire != nullptr) {
++      *wire = finished.wire;
++    }
++    return finished.peer;
++  }
++
++  [[nodiscard]] bool QueuePartial(std::size_t bytes, QueuedPartial* partial,
++                                  std::string* error) override {
++    std::lock_guard lock(mutex_);
++    if (!CheckExchange(static_cast<const float*>(send_device_), bytes, error)) {
++      return false;
++    }
++    if (started_ != 0 || queued_ == kQueuedExchanges) {
++      Poison(error, "tbstream exchange queued with too many in flight");
++      return false;
++    }
++    if (std::string worker_error; !StartWorker(&worker_error)) {
++      Poison(error, std::move(worker_error));
++      return false;
++    }
++    const std::uint64_t operation_id = next_operation_;
++    const std::size_t window = (operation_id % kWindows) * kWindowBytes;
++    auto* flags = static_cast<std::uint8_t*>(flags_device_);
++    const TbstreamWire exchange_wire = WireFor(bytes);
++    *partial = {
++        .send = reinterpret_cast<float*>(
++            static_cast<std::uint8_t*>(send_device_) + window + kDataOffset),
++        .peer = reinterpret_cast<const float*>(
++            static_cast<std::uint8_t*>(recv_device_) + window + kDataOffset),
++        .ready = reinterpret_cast<std::uint64_t*>(flags + kReadyOffset),
++        .arrived =
++            reinterpret_cast<const std::uint64_t*>(flags + kArrivedOffset),
++        // Flags start at zero, so exchange k publishes k + 1.
++        .value = operation_id + 1,
++        .arrivals = static_cast<std::uint32_t*>(arrivals_),
++        .timed_out = reinterpret_cast<std::uint32_t*>(flags + kTimedOutOffset),
++        .wait_ticks = wait_ticks_,
++        .wire = exchange_wire,
++    };
++    Expect({.scope_id = *bound_scope_,
++            .operation_id = operation_id,
++            .bytes = TbstreamWireBytes(bytes, exchange_wire),
++            .queued = true});
++    {
++      std::lock_guard jobs(jobs_mutex_);
++      jobs_.push_back({.bytes = TbstreamWireBytes(bytes, exchange_wire),
++                       .fp32_bytes = bytes,
++                       .scope_id = *bound_scope_,
++                       .operation_id = operation_id,
++                       .queued = true,
++                       .wire = exchange_wire});
++    }
++    ++next_operation_;
++    ++queued_;
++    jobs_ready_.notify_one();
++    return true;
++  }
++
++  [[nodiscard]] bool CheckQueued(std::string* error) override {
++    std::lock_guard lock(mutex_);
++    if (!poisoned_ &&
++        Flag<std::uint32_t>(kTimedOutOffset).load(std::memory_order_acquire) !=
++            0) {
++      poisoned_ = true;
++      if (first_error_.empty()) {
++        first_error_ = "a GPU wait for a queued tbstream exchange timed out";
++      }
++    }
++    if (poisoned_) {
++      PoisonedError(error);
++      return false;
++    }
++    return true;
++  }
++
++private:
++  struct Job {
++    hipEvent_t ready{nullptr};
++    const float* data{nullptr};
++    /// Wire bytes: what WriteFrame sends and ReadFrame expects.
++    std::size_t bytes{0};
++    /// The f32 payload bytes the staging step reads.
++    std::size_t fp32_bytes{0};
++    std::uint64_t scope_id{0};
++    std::uint64_t operation_id{0};
++    /// A QueuePartial exchange: the GPU stages it and waits for it.
++    bool queued{false};
++    /// Wire representation of this exchange's payload.
++    TbstreamWire wire{TbstreamWire::kF32};
++  };
++  struct Finished {
++    const float* peer{nullptr};
++    std::size_t bytes{0};
++    TbstreamWire wire{TbstreamWire::kF32};
++    std::string error;
++  };
++  /// The reader thread's view of one exchange: where its frame must land and
++  /// how its arrival is published.
++  struct Expected {
++    std::uint64_t scope_id{0};
++    std::uint64_t operation_id{0};
++    std::size_t bytes{0};
++    bool queued{false};
++  };
++
++  /// Poisons the communicator under `mutex_`, keeping the first failure so
++  /// later calls report why the sequence cannot continue. The callers of this
++  /// rule-violation poison hold `mutex_` from their validation, and the
++  /// synchronous exchange holds it across its wait, so no waiter exists that
++  /// this path would need to release; the reader thread releases its own
++  /// waiters through the failure hint.
++  void Poison(std::string* error, std::string message) {
++    poisoned_ = true;
++    if (first_error_.empty()) {
++      first_error_ = message;
++    }
++    SetError(error, std::move(message));
++  }
++
++  /// Reports a call on the poisoned communicator, under `mutex_`.
++  void PoisonedError(std::string* error) const {
++    std::string message = "tbstream communicator is poisoned";
++    if (!first_error_.empty()) {
++      message += ": " + first_error_;
++    } else {
++      message +=
++          ReaderFailureText(failure_hint_.load(std::memory_order_acquire));
++    }
++    SetError(error, std::move(message));
++  }
++
++  /// Validates an exchange of `bytes` at `data` under `mutex_`, poisoning the
++  /// communicator when the sequence cannot continue.
++  [[nodiscard]] bool CheckExchange(const float* data, std::size_t bytes,
++                                   std::string* error) {
++    if (fd_ < 0) {
++      SetError(error, "tbstream communicator is not initialized");
++      return false;
++    }
++    if (control_ == nullptr) {
++      SetError(error, "tbstream control channel is not initialized");
++      return false;
++    }
++    if (poisoned_) {
++      PoisonedError(error);
++      return false;
++    }
++    if (!bound_scope_.has_value()) {
++      Poison(error, "tbstream collective has no bound operation scope");
++      return false;
++    }
++    if (bytes % sizeof(float) != 0 || (bytes != 0 && data == nullptr)) {
++      Poison(error, "all-reduce buffer is invalid");
++      return false;
++    }
++    if (next_operation_ == std::numeric_limits<std::uint64_t>::max()) {
++      Poison(error, "tbstream collective operation sequence exhausted");
++      return false;
++    }
++    if (bytes > kWindowBytes - kDataOffset) {
++      Poison(error, "all-reduce payload exceeds the receive window");
++      return false;
++    }
++    return true;
++  }
++
++  [[nodiscard]] std::uint8_t* SendWindow(std::uint64_t operation_id) const {
++    return static_cast<std::uint8_t*>(send_buffer_) +
++           (operation_id % kWindows) * kWindowBytes;
++  }
++
++  [[nodiscard]] const float* RecvWindow(std::uint64_t operation_id) const {
++    return reinterpret_cast<const float*>(
++        static_cast<std::uint8_t*>(recv_device_) +
++        (operation_id % kWindows) * kWindowBytes + kDataOffset);
++  }
++
++  template<typename T>
++  [[nodiscard]] std::atomic_ref<T> Flag(std::size_t offset) const {
++    return std::atomic_ref<T>(
++        *reinterpret_cast<T*>(static_cast<std::uint8_t*>(flags_) + offset));
++  }
++
++  /// Registers the frame of `expected` with the reader thread, which places
++  /// the peer's frame of the same exchange into the receive window and
++  /// publishes its arrival. The byte stream is ordered, so the reader's
++  /// frames come in operation order however far the peer runs ahead.
++  void Expect(Expected expected) {
++    {
++      std::lock_guard expected_lock(expected_mutex_);
++      expected_.push_back(expected);
++    }
++    expected_cv_.notify_one();
++  }
++
++  /// Writes the header and the partial staged in the send window of
++  /// `operation_id` to the stream device. The peer's reader thread is always
++  /// draining its end, so a frame larger than the device's rings still moves
++  /// even while the peer is writing its own frame of the same exchange. The
++  /// write waits under the collective timeout and watches the bootstrap
++  /// socket, so a lost peer or a stop fails the write instead of blocking
++  /// for the timeout.
++  [[nodiscard]] bool WriteFrame(std::uint64_t scope_id,
++                                std::uint64_t operation_id, std::size_t bytes,
++                                std::string* error) {
++    const CollectiveHeader outgoing{
++        .scope_id = scope_id,
++        .operation_id = operation_id,
++        .bytes = bytes,
++    };
++    std::uint8_t* send = SendWindow(operation_id);
++    std::memcpy(send, &outgoing, sizeof(outgoing));
++    const std::size_t frame_bytes = kDataOffset + bytes;
++    const auto deadline = std::chrono::steady_clock::now() + kCollectiveTimeout;
++    // A full ring eases as soon as the peer's reader drains it, which an
++    // exchange peer does within microseconds: retrying the write captures
++    // that space at once, while sleeping in poll(2) pays the interrupt
++    // pacing. Spin the exchange window first, mirroring the reader.
++    const auto spin_deadline =
++        std::chrono::steady_clock::now() + kExchangeSpinWindow;
++    std::size_t written = 0;
++    std::size_t pacing_mark = 0;
++    while (written < frame_bytes) {
++      if (stopping_.load(std::memory_order_relaxed)) {
++        SetError(error, "tbstream communicator stopped");
++        return false;
++      }
++      const ssize_t n = ::write(fd_, send + written, frame_bytes - written);
++      if (n > 0) {
++        written += static_cast<std::size_t>(n);
++        wrote_bytes_ += static_cast<std::uint64_t>(n);
++        if (tx_pacing_us_ > 0) {
++          // One breath per MiB inside the frame keeps the peer's repost
++          // loop from running the NHI into the ground on long bursts.
++          constexpr std::size_t kPacingGranularity = 1u << 20;
++          pacing_mark += static_cast<std::size_t>(n);
++          while (pacing_mark >= kPacingGranularity) {
++            pacing_mark -= kPacingGranularity;
++            ::usleep(tx_pacing_us_);
++          }
++        }
++        continue;
++      }
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        if (std::chrono::steady_clock::now() < spin_deadline) {
++          CpuRelax();
++          continue;
++        }
++        std::array<pollfd, 2> fds{
++            pollfd{.fd = fd_, .events = POLLOUT, .revents = 0},
++            pollfd{.fd = control_ != nullptr ? control_->fd() : -1,
++                   .events = POLLIN,
++                   .revents = 0}};
++        const int poll_result = ::poll(fds.data(), fds.size(), 1000);
++        if (poll_result < 0 && errno != EINTR) {
++          SetError(error, SystemError("tbstream write poll"));
++          return false;
++        }
++        if (fds[1].revents != 0) {
++          SetError(error, "tbstream peer closed the bootstrap connection");
++          return false;
++        }
++        if (std::chrono::steady_clock::now() >= deadline) {
++          SetError(error, "tbstream write timed out");
++          return false;
++        }
++        continue;
++      }
++      SetError(error, SystemError("tbstream write"));
++      return false;
++    }
++    return true;
++  }
++
++  /// Waits until the reader has placed the peer's frame of `operation_id` in
++  /// the receive window: spins briefly, then sleeps on its notification.
++  /// Failures are checked first, so a released wait never reads a window the
++  /// reader did not fill.
++  [[nodiscard]] bool WaitArrival(std::uint64_t operation_id,
++                                 std::string* error) {
++    const std::uint64_t target = operation_id + 1;
++    const auto start = std::chrono::steady_clock::now();
++    const auto spin_deadline = start + kExchangeSpinWindow;
++    const auto deadline = start + kCollectiveTimeout;
++    const auto ready = [&] {
++      return failure_hint_.load(std::memory_order_acquire) != nullptr ||
++             stopping_.load(std::memory_order_relaxed) ||
++             arrival_op_.load(std::memory_order_acquire) >= target;
++    };
++    while (!ready()) {
++      const auto now = std::chrono::steady_clock::now();
++      if (now >= deadline) {
++        SetError(error, "tbstream all-reduce timed out");
++        return false;
++      }
++      if (now >= spin_deadline) {
++        std::unique_lock arrival(arrival_mutex_);
++        arrival_cv_.wait_until(arrival, deadline, ready);
++        continue;
++      }
++      CpuRelax();
++    }
++    if (void* hint = failure_hint_.load(std::memory_order_acquire);
++        hint != nullptr) {
++      SetError(error, ReaderFailureText(hint));
++      return false;
++    }
++    if (stopping_.load(std::memory_order_relaxed)) {
++      SetError(error, "tbstream communicator stopped");
++      return false;
++    }
++    return true;
++  }
++
++  /// Starts the thread that writes overlapped exchanges, under `mutex_`.
++  [[nodiscard]] bool StartWorker(std::string* error) {
++    if (worker_.joinable()) {
++      return true;
++    }
++    if (copy_stream_ == nullptr &&
++        hipStreamCreateWithFlags(&copy_stream_, hipStreamNonBlocking) !=
++            hipSuccess) {
++      copy_stream_ = nullptr;
++      SetError(error, "overlapped exchange stream creation failed");
++      return false;
++    }
++    for (hipEvent_t& event : ready_events_) {
++      if (event == nullptr &&
++          hipEventCreateWithFlags(&event, hipEventDisableTiming) !=
++              hipSuccess) {
++        event = nullptr;
++        SetError(error, "overlapped exchange event creation failed");
++        return false;
++      }
++    }
++    try {
++      worker_ = std::thread([this] {
++        PinToCpuFromTop(2);
++        Work();
++      });
++    } catch (const std::system_error&) {
++      SetError(error, "overlapped exchange thread creation failed");
++      return false;
++    }
++    return true;
++  }
++
++  /// Stages `fp32_bytes` of device `data` into the payload area of a host
++  /// `window` in `wire`'s representation, queued on `stream`; the sync that
++  /// follows makes the payload visible. The quantizing kernels publish the
++  /// exchange's `value` in the ready flag, which only rises, matching the
++  /// queued path's protocol. Returns false only for a rejected f32 copy.
++  [[nodiscard]] bool StageIntoWindow(void* window, const float* data,
++                                     std::size_t fp32_bytes, TbstreamWire wire,
++                                     std::uint64_t operation_id,
++                                     hipStream_t stream) {
++    auto* payload = static_cast<std::uint8_t*>(window) + kDataOffset;
++    const std::size_t count = fp32_bytes / sizeof(float);
++    auto* const arrivals = static_cast<std::uint32_t*>(arrivals_);
++    auto* const ready = reinterpret_cast<std::uint64_t*>(
++        static_cast<std::uint8_t*>(flags_device_) + kReadyOffset);
++    switch (wire) {
++      case TbstreamWire::kF32:
++        return hipMemcpyAsync(payload, data, fp32_bytes,
++                              hipMemcpyDeviceToHost,
++                              stream) == hipSuccess;
++      case TbstreamWire::kF16:
++        StagePartialF16(data, reinterpret_cast<__half*>(payload), count,
++                        arrivals, ready, operation_id + 1, stream);
++        return true;
++      case TbstreamWire::kQ8:
++        StagePartialQ8(data, reinterpret_cast<__half*>(payload),
++                       reinterpret_cast<std::int8_t*>(
++                           payload + TbstreamQ8DataOffset(fp32_bytes)),
++                       count, arrivals, ready, operation_id + 1, stream);
++        return true;
++    }
++    return false;
++  }
++
++  /// Wire representation for an f32 payload of `fp32_bytes`: the configured
++  /// quantization applies only to bandwidth-bound frames; small exchanges
++  /// keep the exact f32 path.
++  [[nodiscard]] TbstreamWire WireFor(std::size_t fp32_bytes) const noexcept {
++    return fp32_bytes >= kQuantizeMinBytes ? wire_ : TbstreamWire::kF32;
++  }
++
++  /// Runs exchanges in order. A started exchange's staging copy runs on a
++  /// stream of its own, which waits for the partial without waiting for the
++  /// work queued behind it; a queued exchange's GPU stages it and publishes
++  /// it, and learns of its arrival through the arrived flag the reader
++  /// raises.
++  void Work() {
++    const bool device =
++        hipSetDevice(static_cast<int>(config_.device_index)) == hipSuccess;
++    for (;;) {
++      Job job;
++      {
++        std::unique_lock jobs(jobs_mutex_);
++        jobs_ready_.wait(jobs, [this] {
++          return stopping_.load(std::memory_order_relaxed) || !jobs_.empty();
++        });
++        if (stopping_.load(std::memory_order_relaxed)) {
++          return;
++        }
++        job = jobs_.front();
++        jobs_.pop_front();
++      }
++      Finished finished{.bytes = job.bytes, .wire = job.wire};
++      std::string poisoned;
++      {
++        std::lock_guard lock(mutex_);
++        if (poisoned_) {
++          PoisonedError(&poisoned);
++        }
++      }
++      if (!poisoned.empty()) {
++        finished.error = std::move(poisoned);
++      } else if (job.queued) {
++        // The GPU publishes the staged partial through the ready flag; the
++        // reader thread finishes the exchange when the peer's frame arrives
++        // and raises the arrived flag, so the worker only writes its end.
++        std::string queued_error;
++        if (!WaitReady(job.operation_id + 1, &queued_error)) {
++          queued_error =
++              "queued exchange failed waiting for the GPU: " + queued_error;
++        } else if (!WriteFrame(job.scope_id, job.operation_id, job.bytes,
++                               &queued_error)) {
++          queued_error = "queued exchange write failed: " + queued_error;
++        }
++        if (!queued_error.empty()) {
++          // A failure releases every GPU wait still queued on the stream:
++          // it runs to its end and the caller learns of the failure from
++          // CheckQueued. The flag only rises, so the reader's later
++          // arrivals cannot drag it back down.
++          Flag<std::uint64_t>(kArrivedOffset)
++              .store(std::numeric_limits<std::uint64_t>::max(),
++                     std::memory_order_release);
++          std::lock_guard lock(mutex_);
++          poisoned_ = true;
++          if (first_error_.empty()) {
++            first_error_ = queued_error;
++          }
++        }
++      } else if (!device ||
++                 hipStreamWaitEvent(copy_stream_, job.ready, 0) !=
++                     hipSuccess ||
++                 (job.bytes != 0 &&
++                  !StageIntoWindow(SendWindow(job.operation_id), job.data,
++                                   job.fp32_bytes, job.wire,
++                                   job.operation_id, copy_stream_)) ||
++                 hipStreamSynchronize(copy_stream_) != hipSuccess) {
++        finished.error = "HIP device-to-host overlapped staging failed";
++      } else if (!WriteFrame(job.scope_id, job.operation_id, job.bytes,
++                             &finished.error)) {
++        finished.error = "overlapped exchange write failed: " + finished.error;
++      } else if (!WaitArrival(job.operation_id, &finished.error)) {
++        finished.error =
++            "overlapped exchange arrival failed: " + finished.error;
++      } else {
++        finished.peer = RecvWindow(job.operation_id);
++      }
++      const bool failed = finished.peer == nullptr && !job.queued;
++      if (failed) {
++        std::lock_guard lock(mutex_);
++        poisoned_ = true;
++        if (first_error_.empty()) {
++          first_error_ = finished.error;
++        }
++      }
++      if (job.queued) {
++        continue;
++      }
++      {
++        std::lock_guard jobs(jobs_mutex_);
++        finished_.push_back(std::move(finished));
++      }
++      finished_ready_.notify_all();
++    }
++  }
++
++  /// Waits until the GPU has published the partial of queued exchange
++  /// `value - 1`: spins briefly, then polls.
++  [[nodiscard]] bool WaitReady(std::uint64_t value, std::string* error) {
++    const auto start = std::chrono::steady_clock::now();
++    const auto spin_deadline = start + kExchangeSpinWindow;
++    const auto deadline = start + kCollectiveTimeout;
++    while (Flag<std::uint64_t>(kReadyOffset).load(std::memory_order_acquire) <
++           value) {
++      if (stopping_.load(std::memory_order_relaxed)) {
++        SetError(error, "tbstream communicator stopped");
++        return false;
++      }
++      const auto now = std::chrono::steady_clock::now();
++      if (now >= deadline) {
++        SetError(error, "tbstream exchange timed out waiting for the GPU");
++        return false;
++      }
++      if (now >= spin_deadline) {
++        std::this_thread::sleep_for(std::chrono::microseconds(20));
++      } else {
++        CpuRelax();
++      }
++    }
++    return true;
++  }
++
++  /// The reader thread: owns every read of the stream device. Frames come in
++  /// operation order, so each lands in its rotating receive window, is
++  /// checked against the exchange this rank queued for the same operation,
++  /// and its arrival is published to the waiter or, for a queued exchange,
++  /// to the GPU's arrived flag. The bootstrap socket is polled alongside the
++  /// device: it carries nothing after setup, so readable means the peer
++  /// closed or reset it.
++  void Read() {
++    for (;;) {
++      Expected expected;
++      {
++        std::unique_lock expected_lock(expected_mutex_);
++        expected_cv_.wait(expected_lock, [this] {
++          return stopping_.load(std::memory_order_relaxed) ||
++                 !expected_.empty();
++        });
++        if (stopping_.load(std::memory_order_relaxed)) {
++          return;
++        }
++        expected = expected_.front();
++        expected_.pop_front();
++      }
++      if (!ReadFrame(expected)) {
++        return;
++      }
++      PublishArrival(expected);
++    }
++  }
++
++  /// Reads one framed exchange into its receive window on the blocking read
++  /// descriptor. Returns false once the communicator cannot continue, after
++  /// releasing every waiter; a stop leaves the thread parked in read(2)
++  /// until the process exits.
++  [[nodiscard]] bool ReadFrame(const Expected& expected) {
++    std::uint8_t* window = static_cast<std::uint8_t*>(recv_buffer_) +
++                           (expected.operation_id % kWindows) * kWindowBytes;
++    const std::size_t frame_bytes = kDataOffset + expected.bytes;
++    std::size_t received = 0;
++    void* failure = nullptr;
++    // A blocking read with no poll and no timeout: this driver reports
++    // arriving frames through the blocking read path only, so the reader
++    // parks in read(2) and returns as soon as the frame's bytes are there.
++    // An empty ring reads as zero bytes; the peer's frame of a decode
++    // exchange lands within the exchange spin window, so the reader spins
++    // that long before sleeping and keeps the arrival off the sleep
++    // granularity. A peer that never sends leaves it retrying; the waiters'
++    // collective timeout fails the exchange and poisons the communicator,
++    // and a stop leaves the thread parked until the process exits (it is
++    // detached and its descriptor is never closed).
++    const auto spin_deadline =
++        std::chrono::steady_clock::now() + kExchangeSpinWindow;
++    while (received < frame_bytes) {
++      const ssize_t n =
++          ::read(read_fd_, window + received, frame_bytes - received);
++      if (n > 0) {
++        received += static_cast<std::size_t>(n);
++        continue;
++      }
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        continue;
++      }
++      if (n == 0) {
++        if (std::chrono::steady_clock::now() < spin_deadline) {
++          CpuRelax();
++        } else {
++          ::usleep(100);
++        }
++        continue;
++      }
++      failure = reinterpret_cast<void*>(
++          static_cast<std::uintptr_t>(ReaderFailure::kStreamRead));
++      break;
++    }
++    CollectiveHeader incoming{};
++    if (failure == nullptr) {
++      std::memcpy(&incoming, window, sizeof(incoming));
++      if (incoming.magic != kCollectiveMagic ||
++          incoming.version != kCollectiveVersion ||
++          incoming.scope_id != expected.scope_id ||
++          incoming.operation_id != expected.operation_id ||
++          incoming.bytes != expected.bytes) {
++        std::fprintf(stderr,
++                     "tbstream collective mismatch: expected scope %llu "
++                     "operation %llu bytes %llu, received scope %llu "
++                     "operation %llu bytes %llu\n",
++                     static_cast<unsigned long long>(expected.scope_id),
++                     static_cast<unsigned long long>(expected.operation_id),
++                     static_cast<unsigned long long>(expected.bytes),
++                     static_cast<unsigned long long>(incoming.scope_id),
++                     static_cast<unsigned long long>(incoming.operation_id),
++                     static_cast<unsigned long long>(incoming.bytes));
++        failure = reinterpret_cast<void*>(
++            static_cast<std::uintptr_t>(ReaderFailure::kHeader));
++      }
++    }
++    if (failure == nullptr) {
++      return true;
++    }
++    Fail(failure);
++    return false;
++  }
++
++  /// Publishes the arrival of a fully received frame: counts a queued
++  /// exchange out before the GPU learns of the arrival, so a scope that ends
++  /// once the stream has drained finds nothing in flight, then raises the
++  /// GPU's arrived flag for the queued exchange and wakes host waiters.
++  void PublishArrival(const Expected& expected) {
++    if (expected.queued) {
++      {
++        std::lock_guard lock(mutex_);
++        --queued_;
++      }
++      RaiseArrivedFlag(expected.operation_id + 1);
++    }
++    std::uint64_t current = arrival_op_.load(std::memory_order_relaxed);
++    while (current < expected.operation_id + 1 &&
++           !arrival_op_.compare_exchange_weak(
++               current, expected.operation_id + 1, std::memory_order_release,
++               std::memory_order_relaxed)) {
++    }
++    arrival_cv_.notify_all();
++  }
++
++  /// Raises the GPU's arrived flag without ever lowering it: the terminal
++  /// value a failed or stopped exchange stores must outlive every later
++  /// arrival the reader still publishes.
++  void RaiseArrivedFlag(std::uint64_t value) noexcept {
++    auto flag = Flag<std::uint64_t>(kArrivedOffset);
++    std::uint64_t current = flag.load(std::memory_order_relaxed);
++    while (current < value && !flag.compare_exchange_weak(
++                                  current, value, std::memory_order_release,
++                                  std::memory_order_relaxed)) {
++    }
++  }
++
++  /// Releases every waiter with `failure` as the reason and records the
++  /// first error. The hint and the arrival counter are stored before the
++  /// lock, so a synchronous exchange that holds the lock while waiting still
++  /// wakes and fails at once.
++  void Fail(void* failure) {
++    failure_hint_.store(failure, std::memory_order_release);
++    arrival_op_.store(std::numeric_limits<std::uint64_t>::max(),
++                      std::memory_order_release);
++    {
++      // Nothing will answer a GPU wait still queued on a stream.
++      Flag<std::uint64_t>(kArrivedOffset)
++          .store(std::numeric_limits<std::uint64_t>::max(),
++                 std::memory_order_release);
++    }
++    arrival_cv_.notify_all();
++    {
++      std::lock_guard lock(mutex_);
++      poisoned_ = true;
++      if (first_error_.empty()) {
++        first_error_ = ReaderFailureText(failure);
++      }
++    }
++  }
++
++  void StopWorker() noexcept {
++    {
++      std::lock_guard jobs(jobs_mutex_);
++      stopping_.store(true, std::memory_order_relaxed);
++    }
++    jobs_ready_.notify_all();
++    // A worker in WaitArrival sleeps on this condition variable until its
++    // deadline; the stop must wake it at once.
++    arrival_cv_.notify_all();
++    if (worker_.joinable()) {
++      worker_.join();
++    }
++    if (flags_ != nullptr) {
++      // Nothing will answer a wait still queued on a stream.
++      Flag<std::uint64_t>(kArrivedOffset)
++          .store(std::numeric_limits<std::uint64_t>::max(),
++                 std::memory_order_release);
++    }
++    for (hipEvent_t& event : ready_events_) {
++      if (event != nullptr) {
++        (void)hipEventDestroy(event);
++        event = nullptr;
++      }
++    }
++    if (copy_stream_ != nullptr) {
++      (void)hipStreamDestroy(copy_stream_);
++      copy_stream_ = nullptr;
++    }
++  }
++
++  void StopReader() noexcept {
++    {
++      std::lock_guard expected(expected_mutex_);
++      stopping_.store(true, std::memory_order_relaxed);
++    }
++    expected_cv_.notify_all();
++    arrival_cv_.notify_all();
++    if (!reader_.joinable()) {
++      return;
++    }
++    // A quiescent reader parks on expected_cv_ and exits here, so its
++    // descriptor can be closed in-process once it is joined. One blocked in
++    // read(2) on a frame a dead peer never sends cannot be interrupted (the
++    // driver has no cancel path), so after a bounded join it is detached and
++    // the descriptor is left to process exit, as before. Either way the
++    // std::thread must end up not-joinable: a successful raw join leaves its
++    // handle stale, and detach() clears it (pthread_detach of an
++    // already-joined thread is a harmless no-op error).
++    struct timespec deadline {};
++    clock_gettime(CLOCK_REALTIME, &deadline);
++    deadline.tv_sec += 2;
++    reader_joined_ = pthread_timedjoin_np(reader_.native_handle(), nullptr,
++                                          &deadline) == 0;
++    reader_.detach();
++  }
++
++  void Cleanup() noexcept {
++    // The worker writes and the reader reads the stream device until they
++    // stop.
++    StopWorker();
++    StopReader();
++    control_.reset();
++    if (fd_ >= 0) {
++      // Quiesce before the tunnel tears down: after a long burst both NHIs
++      // are still draining reposts, and an immediate close parks hop
++      // deactivation in config-space timeouts that wedge the next tunnel
++      // activation. A short settle is free at process lifetime scale.
++      if (wrote_bytes_ != 0) {
++        ::usleep(300'000);
++      }
++      ::close(fd_);
++      fd_ = -1;
++    }
++    if (read_fd_ >= 0 && (reader_joined_ || !reader_started_)) {
++      // The reader is gone (quiescent shutdown or it never started), so the
++      // second close releases the device here — orderly, in-process, after
++      // the quiesce above. Otherwise the descriptor stays open for the
++      // parked reader and process exit releases it, as before.
++      ::close(read_fd_);
++      read_fd_ = -1;
++    }
++    if (arrivals_ != nullptr) {
++      (void)hipFree(arrivals_);
++      arrivals_ = nullptr;
++    }
++    if (flags_ != nullptr) {
++      (void)hipHostFree(flags_);
++      flags_ = nullptr;
++    }
++    flags_device_ = nullptr;
++    if (send_buffer_ != nullptr) {
++      (void)hipHostFree(send_buffer_);
++      send_buffer_ = nullptr;
++    }
++    if (recv_buffer_ != nullptr) {
++      (void)hipHostFree(recv_buffer_);
++      recv_buffer_ = nullptr;
++    }
++    send_device_ = nullptr;
++    recv_device_ = nullptr;
++  }
++
++  TbstreamConfig config_;
++  int fd_{-1};
++  // The reader's blocking descriptor; never closed (see StopReader).
++  int read_fd_{-1};
++  // TX pacing (see Initialize): microseconds per MiB inside a frame write.
++  std::uint32_t tx_pacing_us_{25};
++  std::uint64_t wrote_bytes_{0};
++  // Wire representation for large frames (see Initialize's env parse).
++  TbstreamWire wire_{TbstreamWire::kF32};
++  void* send_buffer_{nullptr};
++  void* recv_buffer_{nullptr};
++  void* send_device_{nullptr};
++  void* recv_device_{nullptr};
++  // Queued exchanges' flags (kReadyOffset...) in host memory the GPU maps,
++  // and the stage kernel's block counter.
++  void* flags_{nullptr};
++  void* flags_device_{nullptr};
++  void* arrivals_{nullptr};
++  std::uint64_t wait_ticks_{0};
++  std::unique_ptr<Socket> control_;
++  std::optional<std::uint64_t> bound_scope_;
++  // Monotonic for the communicator lifetime; scope_id supplies request
++  // identity.
++  std::uint64_t next_operation_{0};
++  bool poisoned_{false};
++  // The first failure that poisoned the communicator.
++  std::string first_error_;
++  // The reader's failure, published without the communicator lock so a
++  // holder of the lock waiting for an exchange wakes and names it.
++  std::atomic<void*> failure_hint_{nullptr};
++  // The last exchange whose peer frame has fully arrived, plus one; max()
++  // when the reader failed. Readers publish, waiters only read.
++  std::atomic<std::uint64_t> arrival_op_{0};
++  // Started exchanges not yet finished, and queued exchanges not yet
++  // complete.
++  std::size_t started_{0};
++  std::size_t queued_{0};
++  mutable std::mutex mutex_;
++  // The overlapped exchanges: the worker takes jobs in order and hands back
++  // their results in the same order. Lock order: mutex_ before jobs_mutex_
++  // and expected_mutex_.
++  std::thread worker_;
++  std::thread reader_;
++  // Reader lifecycle for teardown: whether the reader thread was ever
++  // started, and whether StopReader() joined it (a quiescent reader parks on
++  // expected_cv_ and joins; one blocked in read(2) cannot be interrupted).
++  bool reader_started_{false};
++  bool reader_joined_{false};
++  hipStream_t copy_stream_{nullptr};
++  std::array<hipEvent_t, kStartedExchanges> ready_events_{};
++  std::deque<Job> jobs_;
++  std::deque<Finished> finished_;
++  std::deque<Expected> expected_;
++  std::atomic<bool> stopping_{false};
++  std::mutex jobs_mutex_;
++  std::condition_variable jobs_ready_;
++  std::condition_variable finished_ready_;
++  std::mutex expected_mutex_;
++  std::condition_variable expected_cv_;
++  std::mutex arrival_mutex_;
++  std::condition_variable arrival_cv_;
++};
++
++}  // namespace
++
++std::shared_ptr<Communicator> CreateTbstreamCommunicator(
++    const TbstreamConfig& config, std::string* error_msg) {
++  auto communicator = std::make_shared<Tbstream>(config);
++  if (!communicator->Initialize(error_msg)) {
++    return nullptr;
++  }
++  return communicator;
++}
++
++}  // namespace gufo::models::qwen38_flash_next::rocm
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp b/src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp
+new file mode 100644
+index 0000000..855dada
+--- /dev/null
++++ b/src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp
+@@ -0,0 +1,39 @@
++#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_TBSTREAM_HPP_
++#define GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_TBSTREAM_HPP_
++
++#include <cstdint>
++#include <memory>
++#include <string>
++
++#include "src/models/qwen38_flash_next/kernels/rocm/communicator.hpp"
++
++namespace gufo::models::qwen38_flash_next::rocm {
++
++struct TbstreamConfig {
++  std::uint32_t rank{0};
++  std::uint32_t world_size{2};
++  /// TCP bootstrap address used by rank 1. Rank 0 binds to all interfaces.
++  /// The socket only pairs the ranks and detects a lost peer.
++  std::string bootstrap_host;
++  std::uint16_t bootstrap_port{18515};
++  std::uint32_t device_index{0};
++  /// Character device of a configured USB4STREAM stream, usually
++  /// /dev/tbstream0. See docs/models/qwen3.8-flash-next/TP2.md.
++  std::string device_path{"/dev/tbstream0"};
++};
++
++/// Creates a two-rank USB4STREAM communicator over a thunderbolt_stream
++/// character device (Linux 7.2 or newer). The device is an ordered byte
++/// stream in both directions, so each exchange is one framed write of a
++/// header and the partial, and a reader thread places the peer's frame of
++/// the same exchange into one of the rotating receive windows and raises
++/// the arrival flag. A lost peer is the bootstrap socket closing, and the
++/// reader owns every read, so a write never waits on this rank reading.
++/// Callers must bind the same control scope before model execution; every
++/// collective carries and validates its operation ordinal.
++[[nodiscard]] std::shared_ptr<Communicator> CreateTbstreamCommunicator(
++    const TbstreamConfig& config, std::string* error_msg);
++
++}  // namespace gufo::models::qwen38_flash_next::rocm
++
++#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_TBSTREAM_HPP_
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp b/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
+index 688245c..4e87969 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
+@@ -423,7 +423,8 @@ public:
+     ibv_port_attr port{};
+     if (ibv_query_port(context_, kPort, &port) != 0 ||
+         port.state != IBV_PORT_ACTIVE ||
+-        port.link_layer != IBV_LINK_LAYER_INFINIBAND) {
++        (port.link_layer != IBV_LINK_LAYER_INFINIBAND &&
++         port.link_layer != IBV_LINK_LAYER_ETHERNET)) {
+       SetError(error, "native InfiniBand port 1 is not active");
+       return false;
+     }
+@@ -539,7 +540,7 @@ public:
+         remote.world_size != config_.world_size ||
+         remote.rank != 1U - config_.rank || remote.qp_num == 0 ||
+         remote.port_num != kPort ||
+-        remote.link_layer != IBV_LINK_LAYER_INFINIBAND ||
++        remote.link_layer != port.link_layer ||
+         remote.mtu < IBV_MTU_256 || remote.mtu > IBV_MTU_4096 ||
+         remote.recv_address != kRecvAddress || remote.recv_rkey == 0) {
+       SetError(error, "verbs bootstrap metadata is invalid");
+@@ -661,6 +662,7 @@ public:
+ 
+   [[nodiscard]] const float* ExchangePartial(const float* data,
+                                              std::size_t bytes,
++                                             TbstreamWire* wire,
+                                              hipStream_t stream,
+                                              std::string* error) override {
+     std::lock_guard lock(mutex_);
+@@ -688,6 +690,9 @@ public:
+       return nullptr;
+     }
+     ++next_operation_;
++    if (wire != nullptr) {
++      *wire = TbstreamWire::kF32;
++    }
+     return peer;
+   }
+ 
+@@ -729,6 +734,7 @@ public:
+   }
+ 
+   [[nodiscard]] const float* FinishPartial(std::size_t bytes,
++                                           TbstreamWire* wire,
+                                            std::string* error) override {
+     {
+       std::lock_guard lock(mutex_);
+@@ -752,6 +758,10 @@ public:
+     }
+     if (finished.peer == nullptr) {
+       Poison(error, finished.error);
++      return nullptr;
++    }
++    if (wire != nullptr) {
++      *wire = TbstreamWire::kF32;
+     }
+     return finished.peer;
+   }
+diff --git a/tests/models/qwen38_flash_next/CMakeLists.txt b/tests/models/qwen38_flash_next/CMakeLists.txt
+index ec3eaf2..4bd13fa 100644
+--- a/tests/models/qwen38_flash_next/CMakeLists.txt
++++ b/tests/models/qwen38_flash_next/CMakeLists.txt
+@@ -49,9 +49,9 @@ if (ENGINE_ENABLE_HIP)
+   target_link_libraries(qwen38_flash_next_tp_probe PRIVATE
+     gufo_qwen38_flash_next hip::host)
+ 
+-  # Batched-decode probe: the same program on both ranks over one RDMA pair,
+-  # with no control channel, scheduler or executor.
+-  if (GUFO_ENABLE_TP2_RDMA)
++  # Batched-decode probe: the same program on both ranks over one transport
++  # pair, with no control channel, scheduler or executor.
++  if (GUFO_ENABLE_TP2_RDMA OR GUFO_ENABLE_TP2_TBSTREAM)
+     add_executable(qwen38_flash_next_tp_batched_probe EXCLUDE_FROM_ALL
+       tp_batched_probe.cpp)
+     target_link_libraries(qwen38_flash_next_tp_batched_probe PRIVATE
+diff --git a/tests/models/qwen38_flash_next/gpu_probe.cpp b/tests/models/qwen38_flash_next/gpu_probe.cpp
+index eec864e..b8d1b94 100644
+--- a/tests/models/qwen38_flash_next/gpu_probe.cpp
++++ b/tests/models/qwen38_flash_next/gpu_probe.cpp
+@@ -43,6 +43,9 @@
+ #ifdef GUFO_ENABLE_TP2_RDMA
+ #include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
+ #endif
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
++#endif
+ #include "src/models/qwen38_flash_next/ngram.hpp"
+ #include "src/models/qwen38_flash_next/reference.hpp"
+ #include "src/models/qwen38_flash_next/weights.hpp"
+@@ -60,7 +63,7 @@ void AuditMtpCosts(q::rocm::Executor& executor,
+ 
+ namespace {
+ 
+-#ifdef GUFO_ENABLE_TP2_RDMA
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
+ class OperationGuard {
+ public:
+   OperationGuard(std::shared_ptr<q::rocm::Communicator> communicator,
+@@ -309,8 +312,12 @@ int main(int argc, char** argv) {
+   std::uint32_t tp_device = 0;
+   std::uint32_t tp_gid = 0;
+   std::uint64_t tp_operation_id = 1;
++  std::string tp_transport = "rdma";
++  std::string tp_tbstream_device = "/dev/tbstream0";
+ #ifndef GUFO_ENABLE_TP2_RDMA
++#if !defined(GUFO_ENABLE_TP2_TBSTREAM)
+   (void)tp_operation_id;
++#endif
+ #endif
+   for (int i = 1; i < argc; ++i) {
+     const std::string arg = argv[i];
+@@ -387,6 +394,14 @@ int main(int argc, char** argv) {
+       }
+     } else if (arg == "--tp-bootstrap-host") {
+       tp_bootstrap_host = next();
++    } else if (arg == "--tp-transport") {
++      tp_transport = next();
++      if (tp_transport != "rdma" && tp_transport != "tbstream") {
++        std::fprintf(stderr, "--tp-transport must be rdma or tbstream\n");
++        return 2;
++      }
++    } else if (arg == "--tp-tbstream-dev") {
++      tp_tbstream_device = next();
+     } else if (arg == "--prompt") {
+       prompt = next();
+     } else if (arg == "--prompt-file" || arg == "--decode-file") {
+@@ -499,7 +514,7 @@ int main(int argc, char** argv) {
+   }
+   std::optional<q::distributed::TpPartition> partition;
+   std::shared_ptr<q::rocm::Communicator> communicator;
+-#ifdef GUFO_ENABLE_TP2_RDMA
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
+   std::unique_ptr<OperationGuard> operation;
+ #endif
+   if (tp_world_size == 2) {
+@@ -509,19 +524,47 @@ int main(int argc, char** argv) {
+       std::fprintf(stderr, "partition failed: %s\n", error.c_str());
+       return 1;
+     }
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
++    if (tp_transport == "tbstream") {
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++      const q::rocm::TbstreamConfig config{
++          .rank = tp_rank,
++          .world_size = tp_world_size,
++          .bootstrap_host = tp_bootstrap_host,
++          .bootstrap_port = tp_bootstrap_port,
++          .device_index = tp_device,
++          .device_path = tp_tbstream_device,
++      };
++      communicator = q::rocm::CreateTbstreamCommunicator(config, &error);
++      if (!communicator) {
++        std::fprintf(stderr, "tbstream communicator failed: %s\n",
++                     error.c_str());
++        return 1;
++      }
++#else
++      std::fprintf(stderr,
++                   "this probe was built without TP2 tbstream support\n");
++      return 2;
++#endif
++    } else {
+ #ifdef GUFO_ENABLE_TP2_RDMA
+-    const q::rocm::IbrverbsConfig config{
+-        .rank = tp_rank,
+-        .world_size = tp_world_size,
+-        .bootstrap_host = tp_bootstrap_host,
+-        .bootstrap_port = tp_bootstrap_port,
+-        .device_index = tp_device,
+-        .gid_index = tp_gid,
+-    };
+-    communicator = q::rocm::CreateIbrverbsCommunicator(config, &error);
+-    if (!communicator) {
+-      std::fprintf(stderr, "RDMA communicator failed: %s\n", error.c_str());
+-      return 1;
++      const q::rocm::IbrverbsConfig config{
++          .rank = tp_rank,
++          .world_size = tp_world_size,
++          .bootstrap_host = tp_bootstrap_host,
++          .bootstrap_port = tp_bootstrap_port,
++          .device_index = tp_device,
++          .gid_index = tp_gid,
++      };
++      communicator = q::rocm::CreateIbrverbsCommunicator(config, &error);
++      if (!communicator) {
++        std::fprintf(stderr, "RDMA communicator failed: %s\n", error.c_str());
++        return 1;
++      }
++#else
++      std::fprintf(stderr, "this probe was built without TP2 RDMA support\n");
++      return 2;
++#endif
+     }
+     operation = std::make_unique<OperationGuard>(communicator, tp_operation_id);
+     if (!operation->Begin(&error)) {
+@@ -530,7 +573,8 @@ int main(int argc, char** argv) {
+       return 1;
+     }
+ #else
+-    std::fprintf(stderr, "this probe was built without TP2 RDMA support\n");
++    std::fprintf(stderr,
++                 "this probe was built without TP2 RDMA or tbstream support\n");
+     return 2;
+ #endif
+   }
+diff --git a/tests/models/qwen38_flash_next/tp_batched_probe.cpp b/tests/models/qwen38_flash_next/tp_batched_probe.cpp
+index 3327b02..049199c 100644
+--- a/tests/models/qwen38_flash_next/tp_batched_probe.cpp
++++ b/tests/models/qwen38_flash_next/tp_batched_probe.cpp
+@@ -56,8 +56,14 @@
+ #include "src/core/sampling.hpp"
+ #include "src/core/session_mode.hpp"
+ #include "src/models/qwen38_flash_next/engine.hpp"
++#include "src/models/qwen38_flash_next/kernels/rocm/communicator.hpp"
+ #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
++#ifdef GUFO_ENABLE_TP2_RDMA
+ #include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
++#endif
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
++#endif
+ 
+ namespace q = gufo::models::qwen38_flash_next;
+ 
+@@ -172,9 +178,11 @@ Options (the same on both ranks unless noted):
+   --tp-rank 0|1           This rank. Required.
+   --tp-bootstrap-host HOST  Rank 0's address; required on rank 1. Rank 0
+                           listens on all interfaces.
+-  --tp-bootstrap-port N   RDMA bootstrap port (default 18515)
++  --tp-bootstrap-port N   Transport bootstrap port (default 18515)
+   --tp-device N           HIP device index (default 0)
+   --tp-gid-index N        RDMA GID index (default 0)
++  --tp-transport T        Data transport, rdma or tbstream (default rdma)
++  --tp-tbstream-dev PATH  USB4STREAM device (default /dev/tbstream0)
+   --model PATH            First GGUF shard, required; a model without an MTP
+                           sidecar
+   --context N             Context (default 4096)
+@@ -290,12 +298,13 @@ public:
+   }
+   [[nodiscard]] const float* ExchangePartial(const float* data,
+                                              std::size_t bytes,
++                                             q::rocm::TbstreamWire* wire,
+                                              hipStream_t stream,
+                                              std::string* error) override {
+     if (recording_) {
+       sizes_.push_back(bytes);
+     }
+-    return inner_->ExchangePartial(data, bytes, stream, error);
++    return inner_->ExchangePartial(data, bytes, wire, stream, error);
+   }
+   [[nodiscard]] bool StartPartial(const float* data, std::size_t bytes,
+                                   hipStream_t stream,
+@@ -306,8 +315,9 @@ public:
+     return inner_->StartPartial(data, bytes, stream, error);
+   }
+   [[nodiscard]] const float* FinishPartial(std::size_t bytes,
++                                           q::rocm::TbstreamWire* wire,
+                                            std::string* error) override {
+-    return inner_->FinishPartial(bytes, error);
++    return inner_->FinishPartial(bytes, wire, error);
+   }
+   [[nodiscard]] bool QueuePartial(std::size_t bytes, QueuedPartial* partial,
+                                   std::string* error) override {
+@@ -588,7 +598,8 @@ int RunBatched(const char* role, const std::shared_ptr<q::Model>& model,
+   // A zero-byte exchange is a barrier: the ranks load the model at different
+   // speeds, and without it the first prefill exchange would bill the slower
+   // load to the faster rank's prefill time.
+-  if (collectives->ExchangePartial(nullptr, 0, nullptr, error) == nullptr) {
++  if (collectives->ExchangePartial(nullptr, 0, nullptr, nullptr, error) ==
++      nullptr) {
+     Warn(std::string(role) + " pre-prefill barrier failed: " + *error);
+     return kTransportFailure;
+   }
+@@ -884,6 +895,8 @@ int main(int argc, char** argv) {
+   bool moe_input_hashes = false;
+   std::uint16_t bootstrap_port = 18515;
+   std::string bootstrap_host;
++  std::string transport = "rdma";
++  std::string tbstream_device = "/dev/tbstream0";
+ 
+   for (int i = 1; i < argc; ++i) {
+     const std::string arg = argv[i];
+@@ -954,6 +967,14 @@ int main(int argc, char** argv) {
+         Warn("--tp-gid-index requires an unsigned integer");
+         return kInvalidArguments;
+       }
++    } else if (arg == "--tp-transport") {
++      transport = next();
++      if (transport != "rdma" && transport != "tbstream") {
++        Warn("--tp-transport must be rdma or tbstream");
++        return kInvalidArguments;
++      }
++    } else if (arg == "--tp-tbstream-dev") {
++      tbstream_device = next();
+     } else if (arg == "--serial") {
+       serial = true;
+     } else if (arg == "--width") {
+@@ -1054,24 +1075,52 @@ int main(int argc, char** argv) {
+     }
+   }
+ 
+-  // The RDMA pair forms first: both bootstraps block for up to 30 s, so the
+-  // model must not be mapped before the pair exists.
++  // The transport pair forms first: both bootstraps block for up to 30 s, so
++  // the model must not be mapped before the pair exists.
+   std::string error;
+-  const q::rocm::IbrverbsConfig rdma{
+-      .rank = *rank,
+-      .world_size = kWorldSize,
+-      // An empty bootstrap host makes rank 0 the listener.
+-      .bootstrap_host = *rank == 0 ? std::string() : bootstrap_host,
+-      .bootstrap_port = bootstrap_port,
+-      .device_index = device,
+-      .gid_index = gid,
+-  };
+-  auto communicator = q::rocm::CreateIbrverbsCommunicator(rdma, &error);
+-  if (!communicator) {
+-    Warn("RDMA communicator failed: " + error);
+-    return kTransportFailure;
++  std::shared_ptr<q::rocm::Communicator> communicator;
++  if (transport == "tbstream") {
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++    const q::rocm::TbstreamConfig tbstream{
++        .rank = *rank,
++        .world_size = kWorldSize,
++        // An empty bootstrap host makes rank 0 the listener.
++        .bootstrap_host = *rank == 0 ? std::string() : bootstrap_host,
++        .bootstrap_port = bootstrap_port,
++        .device_index = device,
++        .device_path = tbstream_device,
++    };
++    communicator = q::rocm::CreateTbstreamCommunicator(tbstream, &error);
++    if (!communicator) {
++      Warn("tbstream communicator failed: " + error);
++      return kTransportFailure;
++    }
++#else
++    Warn("this probe was built without TP2 tbstream support");
++    return kInvalidArguments;
++#endif
++  } else {
++#ifdef GUFO_ENABLE_TP2_RDMA
++    const q::rocm::IbrverbsConfig rdma{
++        .rank = *rank,
++        .world_size = kWorldSize,
++        // An empty bootstrap host makes rank 0 the listener.
++        .bootstrap_host = *rank == 0 ? std::string() : bootstrap_host,
++        .bootstrap_port = bootstrap_port,
++        .device_index = device,
++        .gid_index = gid,
++    };
++    communicator = q::rocm::CreateIbrverbsCommunicator(rdma, &error);
++    if (!communicator) {
++      Warn("RDMA communicator failed: " + error);
++      return kTransportFailure;
++    }
++#else
++    Warn("this probe was built without TP2 RDMA support");
++    return kInvalidArguments;
++#endif
+   }
+-  Say(role.c_str(), "RDMA peer established on bootstrap port " +
++  Say(role.c_str(), transport + " peer established on bootstrap port " +
+                         std::to_string(bootstrap_port));
+   if (allreduce_bench != 0) {
+     return RunAllReduceBench(role.c_str(), communicator, device,
+diff --git a/tests/models/qwen38_flash_next/tp_probe.cpp b/tests/models/qwen38_flash_next/tp_probe.cpp
+index 8dfc5cb..6d139be 100644
+--- a/tests/models/qwen38_flash_next/tp_probe.cpp
++++ b/tests/models/qwen38_flash_next/tp_probe.cpp
+@@ -1,6 +1,7 @@
+ // TP=2 probe: --tp-rank 0|1 --tp-world-size 2
+ //              --tp-bootstrap-host HOST --tp-bootstrap-port PORT
+ //              --tp-operation-id N (same on both ranks)
++//              --tp-transport rdma|tbstream [--tp-tbstream-dev PATH]
+ // Prefill steps: --split N prefills the prompt once in one step and once as
+ // N tokens then the rest, and compares each MoE input and output of the last
+ // token and the final logits: a prefill must not depend on its steps.
+@@ -26,15 +27,21 @@
+ 
+ #include "src/core/sampling.hpp"
+ #include "src/models/qwen38_flash_next/engine.hpp"
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
++#include "src/models/qwen38_flash_next/kernels/rocm/communicator.hpp"
++#endif
+ #ifdef GUFO_ENABLE_TP2_RDMA
+ #include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
+ #endif
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
++#endif
+ 
+ namespace q = gufo::models::qwen38_flash_next;
+ 
+ namespace {
+ 
+-#ifdef GUFO_ENABLE_TP2_RDMA
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
+ class OperationGuard {
+ public:
+   OperationGuard(std::shared_ptr<q::rocm::Communicator> communicator,
+@@ -97,12 +104,16 @@ int main(int argc, char** argv) {
+   std::uint32_t gid = 0;
+   std::uint64_t operation_id = 1;
+ #ifndef GUFO_ENABLE_TP2_RDMA
++#if !defined(GUFO_ENABLE_TP2_TBSTREAM)
+   (void)operation_id;
++#endif
+ #endif
+   std::uint16_t port = 18515;
+   float temperature = 0.0F;
+   std::int64_t seed = 7;
+   std::string bootstrap_host;
++  std::string transport = "rdma";
++  std::string tbstream_device = "/dev/tbstream0";
+   std::uint32_t split = 0;
+   std::uint32_t decode_tail = 0;
+ 
+@@ -187,6 +198,14 @@ int main(int argc, char** argv) {
+       }
+     } else if (arg == "--tp-bootstrap-host") {
+       bootstrap_host = next();
++    } else if (arg == "--tp-transport") {
++      transport = next();
++      if (transport != "rdma" && transport != "tbstream") {
++        Fail("--tp-transport must be rdma or tbstream");
++        return 2;
++      }
++    } else if (arg == "--tp-tbstream-dev") {
++      tbstream_device = next();
+     } else {
+       Fail("unknown argument: " + arg);
+       return 2;
+@@ -203,22 +222,48 @@ int main(int argc, char** argv) {
+   }
+ 
+   std::shared_ptr<q::rocm::Communicator> communicator;
+-#ifdef GUFO_ENABLE_TP2_RDMA
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
+   std::unique_ptr<OperationGuard> operation;
+   if (world_size == 2) {
+     std::string error;
+-    const q::rocm::IbrverbsConfig config{
+-        .rank = rank,
+-        .world_size = world_size,
+-        .bootstrap_host = bootstrap_host,
+-        .bootstrap_port = port,
+-        .device_index = device,
+-        .gid_index = gid,
+-    };
+-    communicator = q::rocm::CreateIbrverbsCommunicator(config, &error);
+-    if (!communicator) {
+-      Fail("RDMA communicator failed: " + error);
+-      return 1;
++    if (transport == "tbstream") {
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++      const q::rocm::TbstreamConfig config{
++          .rank = rank,
++          .world_size = world_size,
++          .bootstrap_host = bootstrap_host,
++          .bootstrap_port = port,
++          .device_index = device,
++          .device_path = tbstream_device,
++      };
++      communicator = q::rocm::CreateTbstreamCommunicator(config, &error);
++      if (!communicator) {
++        Fail("tbstream communicator failed: " + error);
++        return 1;
++      }
++#else
++      Fail("this probe was built without TP2 tbstream support");
++      return 2;
++#endif
++    } else {
++#ifdef GUFO_ENABLE_TP2_RDMA
++      const q::rocm::IbrverbsConfig config{
++          .rank = rank,
++          .world_size = world_size,
++          .bootstrap_host = bootstrap_host,
++          .bootstrap_port = port,
++          .device_index = device,
++          .gid_index = gid,
++      };
++      communicator = q::rocm::CreateIbrverbsCommunicator(config, &error);
++      if (!communicator) {
++        Fail("RDMA communicator failed: " + error);
++        return 1;
++      }
++#else
++      Fail("this probe was built without TP2 RDMA support");
++      return 2;
++#endif
+     }
+     operation = std::make_unique<OperationGuard>(communicator, operation_id);
+     if (!operation->Begin(&error)) {
+@@ -228,7 +273,7 @@ int main(int argc, char** argv) {
+   }
+ #else
+   if (world_size == 2) {
+-    Fail("this probe was built without TP2 RDMA support");
++    Fail("this probe was built without TP2 RDMA or tbstream support");
+     return 2;
+   }
+ #endif
+diff --git a/tools/README.md b/tools/README.md
+index 588ef90..afc3c36 100644
+--- a/tools/README.md
++++ b/tools/README.md
+@@ -11,6 +11,7 @@ benchmark/tuning executables; Python tools run from this source tree.
+ | `bench/` | Kernel microbenchmarks, hipBLASLt tuning, and direct speculative-corpus checks; `model-bench.py` drives per-model BENCHMARKS.md tables against each model's reference |
+ | `prof/` | rocprofv3 capture, stage summaries, and ISA inspection |
+ | `serving/` | HTTP benchmarks, interrupted-chat/disk replay and official OpenAI SDK checks |
++| `tbstream/` | USB4STREAM link qualification for the TP=2 tbstream transport: kernel/stream setup and the host-only `tbstream_probe` microbenchmark |
+ | `ds4/` | DeepSeek-specific validation and experiments |
+ | `qwen27b/` | Qwen27B/DFlash2 kernels, reference checks, and vision validation |
+ | `qwen-flash/` | Flash-Next projection and MoE microbenchmarks |
+diff --git a/tools/tbstream/README.md b/tools/tbstream/README.md
+new file mode 100644
+index 0000000..a729fa3
+--- /dev/null
++++ b/tools/tbstream/README.md
+@@ -0,0 +1,139 @@
++# USB4STREAM qualification for TP=2
++
++Tools for the `tbstream` TP=2 data transport (see
++`docs/models/qwen3.8-flash-next/TP2.md`): `setup-stream.sh` configures the
++kernel's USB4STREAM stream on one host, and `tbstream_probe` measures the
++link. Both run on ordinary Linux with no GPU stack.
++
++## Requirements
++
++- Linux **7.2 or newer**: the `thunderbolt_stream` driver (USB4STREAM
++  protocol, `/dev/tbstreamX`) landed there. On Ubuntu, a mainline kernel
++  from the mainline PPA or `kernel.ubuntu.com` works; verify with
++  `uname -r` and `ls /sys/kernel/config/thunderbolt/stream` after mounting
++  configfs.
++- A direct USB4 v2 (80G) or USB4 (40G) cable between the two Strix Halo
++  hosts. Use the same port pair on both ends for repeatability.
++- `bolt` (`boltctl`) only if the host enforces Thunderbolt security.
++
++## Bring-up on each host
++
++```sh
++sudo mount -t configfs none /sys/kernel/config   # if not already mounted
++sudo tools/tbstream/setup-stream.sh check        # kernel, link, authorization
++sudo tools/tbstream/setup-stream.sh up           # creates stream gufo
++```
++
++`check` names every problem: kernel too old, configfs missing, peer router
++unauthorized (`boltctl authorize <uuid>`, or BIOS security `none`), no
++`/dev/tbstream*`. The stream directory path is discovered from the peer
++router (`0-<route>.0`); override with `TB_STREAM_PATH` or `TB_STREAM_INDEX`
++when the kernel's naming differs (see the kernel's Thunderbolt
++documentation for the exact configfs layout).
++
++Bring the stream up on **both** hosts: each side announces its streams over
++XDomain properties, and the pair negotiates HopIDs automatically
++(`in_hopid`/`out_hopid` set to `-1`).
++
++For the control channel, either keep a LAN between the hosts or let it ride
++the cable on the `tb0`/`tb1` netdev (thunderbolt-net): `ip link set tb0 up`
++and use its link-local IPv6 address as `--tp-bootstrap-host`.
++
++## Qualification (Phase 0 gates)
++
++Run on both hosts; rank 1 points `--peer` at rank 0. First, verify the
++protocol logic anywhere with no hardware: `tbstream_probe --mode loop`.
++
++| Step | Command (both hosts) | Measured 2026-10-01 (Gen3, `--noverify`) |
++| --- | --- | --- |
++| Exchange latency (decode shape) | `tbstream_probe --mode exchange --bytes 10240 --frames 2000 --noverify` | **p50 22–23 µs, p99 34–42 µs** (RDMA baseline: 24 µs) |
++| One-way bandwidth (prefill shape) | `tbstream_probe --mode bw --bytes 1048576,5242880,33554432 --frames 200 --noverify` | 1.01–1.03 / 1.04–1.05 / 1.13–1.14 GB/s |
++
++`--noverify` skips the probe's payload checksums: the byte-at-a-time FNV
++pass costs ~21 µs per 10 KiB exchange and ~0.5 GB/s of receiver
++throughput, which masked the real figures in the first measurement round
++(the checksummed runs reproduce the slower numbers and still cover
++integrity). The transport itself checksums nothing — the GPU adds the
++partial sums directly, as the verbs transport does — so the `--noverify`
++figures are the ones the serving path sees.
++| Large-frame lock-step | `tbstream_probe --mode exchange --bytes 33554432 --frames 20` | deadlocks by design (rings < frame) — proves the transport's always-draining reader is required |
++| Boundary robustness | `tbstream_probe --mode smoke --bytes 10240 --frames 1000` | ok |
++
++Tuning: the stream's configfs attributes trade latency for bulk bandwidth —
++`throttling` 8192 (default) gives 43.6 µs exchanges and 0.50 GB/s at 5 MiB;
++`throttling 65536` gives ~110 µs and 0.77 GB/s. Serving keeps the default.
++
++Record the numbers in `docs/models/qwen3.8-flash-next/EXPERIMENTS.md`
++(TP2-tbstream section) with the kernel version and the negotiated link
++speed (`cat /sys/bus/thunderbolt/devices/<peer>/rx_speed rx_lanes`).
++
++## Driver behavior on Linux 7.2 (AMD Strix Halo pair)
++
++Learned the hard way on 7.2.6; all are reflected in the transport and the
++probe:
++
++- **Stream names are at most eight characters.** A longer name fails the
++  configfs `mkdir` with `ENAMETOOLONG`.
++- **Only blocking reads are reliable.** A frame that arrives while no
++  reader is parked in `read(2)` stays invisible to `poll(2)` and to
++  nonblocking reads. The transport reads on a second, blocking descriptor;
++  an empty ring reads as zero bytes (retry, do not treat as EOF).
++- **Data written before the peer opened the device is stranded.** The
++  probe's post-open barrier and the transport's bootstrap readiness
++  exchange both prevent it.
++- **Never kill a process blocked on the device.** An external kill wedges
++  the stream (next open fails EIO, teardown hangs) and a wedged link flaps
++  every ~55 s until the streams are removed. Exiting through the probe's
++  own 30 s deadline is clean. Recovery ladder: remove the stream on both
++  hosts (`setup-stream.sh down`), then PCI-rebind the controller
++  (`echo <pci> > /sys/bus/pci/drivers/thunderbolt/{un,}bind`), then reboot.
++- **The peer's route string can be any domain** (`0-2`, `1-2`, ...) and
++  changes across rebinds and reboots; `setup-stream.sh` discovers it.
++- Echo-mode (`--mode ping`) at 10 KiB still stalls; exchange and smoke —
++  the transport's shapes — are unaffected.
++
++## Dual-link striping (two cables)
++
++Two cables between the same hosts give two independent USB4 links, and the
++probe stripes frames round-robin over them: pass a comma-separated `--fd`
++list (one stream per link; `--stripe N` is an optional assertion that must
++match the count). This answers whether the single-stream ceiling is the
++link or the host: aggregate ≈ 2× means link-bound, ≈ 1× means the copies,
++rings or interrupts on the host side are the limit.
++
++Bring-up with two cables (run `check` first; it lists every peer router
++with its negotiated speed — one peer per cable):
++
++```sh
++# On each host, one stream per peer router, distinct names (<= 8 chars):
++sudo tools/tbstream/setup-stream.sh up linkA 0-2   # router names from check
++sudo tools/tbstream/setup-stream.sh up linkB 1-3
++
++# Then on both hosts (rank 1 with --peer pointing at rank 0):
++tbstream_probe --mode bw --fd /dev/tbstream0,/dev/tbstream1 \
++               --bytes 5242880 --frames 400
++```
++
++Each link reports its own throughput at the end. What to expect:
++
++- **Decode does not benefit**: the 10 KiB exchange is latency-bound and
++  one link is enough for it; striping a small frame would only add
++  skew-wait.
++- **Prefill-shaped bandwidth can scale ~2×** if the links are the
++  bottleneck (0.5–0.77 GB/s → ~1.0–1.5 GB/s). The 120 Gb/s marketing sum
++  of an 80G plus a 40G port is not reachable: discrete TB5 controllers
++  (e.g. the MS-S1 Max's Barlow Ridge) sit behind PCIe Gen4 x4 (~64 Gb/s
++  per direction shared), cross-vendor Gen4 host-to-host training is
++  unproven, and Gen3-max retimers in uncertified cables cap below that.
++  Certified TB5/USB4v2 cables are required for the 80G ports to matter.
++
++If the dual-link probe scales and prefill bandwidth matters for serving,
++the next step is striping inside the transport itself (one stream per
++link, frames striped by operation id, one reader thread per link).
++
++## Serving over tbstream
++
++Build with `-DGUFO_ENABLE_TP2_TBSTREAM=ON` (Nix: `nix build .#tp2-tbstream`)
++and pass `--tp-transport tbstream` to both ranks. The stream must exist
++(`setup-stream.sh up`) before the ranks start; the ranks pair over the TCP
++bootstrap as with RDMA.
+diff --git a/tools/tbstream/setup-stream.sh b/tools/tbstream/setup-stream.sh
+new file mode 100755
+index 0000000..31e3274
+--- /dev/null
++++ b/tools/tbstream/setup-stream.sh
+@@ -0,0 +1,219 @@
++#!/usr/bin/env bash
++# USB4STREAM (thunderbolt_stream) setup for the gufo TP=2 tbstream
++# transport. Runs on ONE host of a directly connected pair; run it on both.
++#
++#   setup-stream.sh check                    report kernel, link and stream state
++#   setup-stream.sh up [NAME [ROUTER]]       create a stream (default: gufo on
++#                                            the first peer router)
++#   setup-stream.sh down [NAME [ROUTER]]     remove the stream
++#
++# ROUTER names the peer router sysfs entry the stream runs over (e.g. 0-2),
++# as listed by `check`. Give it when more than one peer is connected (one
++# cable per link): run `up` once per router with distinct names, e.g.
++#   setup-stream.sh up linkA 0-2
++#   setup-stream.sh up linkB 1-3
++#
++# Environment overrides:
++#   TB_STREAM_CONFIGFS   configfs mount point (default /sys/kernel/config)
++#   TB_STREAM_PATH       full stream directory path, e.g. .../stream/0-1.0
++#                        (default: discovered from the peer router, index 0)
++#   TB_STREAM_INDEX      stream index appended to the peer route (default 0)
++#
++# Kernel 7.2 or newer is required; the configfs directory
++# <configfs>/thunderbolt/stream exists only when the driver supports it.
++set -euo pipefail
++
++STREAM_CONFIGFS="${TB_STREAM_CONFIGFS:-/sys/kernel/config}"
++STREAM_NAME="gufo"
++STREAM_ROUTER=""
++COMMAND="${1:-check}"
++case "$COMMAND" in
++  check|up|down) ;;
++  *) echo "usage: $0 check|up|down [NAME [ROUTER]]" >&2; exit 2 ;;
++esac
++if [ "$#" -ge 2 ]; then STREAM_NAME="$2"; fi
++if [ "$#" -ge 3 ]; then STREAM_ROUTER="$3"; fi
++# The driver rejects stream names longer than eight characters (EINVAL
++# surfaces as ENAMETOOLONG from mkdir on configfs).
++if [ "${#STREAM_NAME}" -gt 8 ]; then
++  echo "setup-stream.sh: stream name '$STREAM_NAME' is longer than 8 characters" >&2
++  exit 2
++fi
++
++fail() { echo "setup-stream.sh: $*" >&2; exit 1; }
++note() { echo "setup-stream.sh: $*"; }
++
++if [ -n "$STREAM_ROUTER" ] && ! ls "/sys/bus/thunderbolt/devices/$STREAM_ROUTER" >/dev/null 2>&1; then
++  fail "router $STREAM_ROUTER does not exist under /sys/bus/thunderbolt/devices"
++fi
++
++kernel_ok() {
++  local major minor
++  major="$(uname -r | cut -d. -f1)"
++  minor="$(uname -r | cut -d. -f2 | cut -d- -f1)"
++  if [ "$major" -gt 7 ] || { [ "$major" -eq 7 ] && [ "$minor" -ge 2 ]; }; then
++    return 0
++  fi
++  return 1
++}
++
++peer_route() {
++  # The peer host router: a thunderbolt device "D-R" in any domain D whose
++  # route R is not 0 (the host router itself), and not a USB function
++  # ("D-R:F.L"). Direct connections have exactly one; report the first and
++  # warn if there are more.
++  local found="" device
++  for device in /sys/bus/thunderbolt/devices/*; do
++    device="${device##*/}"
++    case "$device" in
++      domain*|*:*|*.*) continue ;;
++      [0-9]*-[0-9]*)
++        case "$device" in
++          *-0) continue ;;
++        esac
++        if [ -z "$found" ]; then
++          found="$device"
++        else
++          note "warning: several peer routers ($found, $device); pick with TB_STREAM_PATH"
++        fi ;;
++    esac
++  done
++  [ -n "$found" ] || return 1
++  echo "$found"
++}
++
++stream_dir() {
++  if [ -n "${TB_STREAM_PATH:-}" ]; then
++    echo "$TB_STREAM_PATH"
++    return
++  fi
++  local route index="${TB_STREAM_INDEX:-0}"
++  if [ -n "$STREAM_ROUTER" ]; then
++    route="$STREAM_ROUTER"
++  else
++    route="$(peer_route)" || fail "no peer router under /sys/bus/thunderbolt/devices; is the cable connected and authorized?"
++  fi
++  echo "$STREAM_CONFIGFS/thunderbolt/stream/${route}.${index}"
++}
++
++check_kernel() {
++  if kernel_ok; then
++    note "kernel $(uname -r) is 7.2 or newer: ok"
++  else
++    note "kernel $(uname -r) is older than 7.2: thunderbolt_stream (USB4STREAM) is missing"
++    return 1
++  fi
++}
++
++check_configfs() {
++  if ! mountpoint -q "$STREAM_CONFIGFS" 2>/dev/null &&
++     ! grep -qs " $STREAM_CONFIGFS " /proc/mounts; then
++    note "configfs is not mounted at $STREAM_CONFIGFS: mount -t configfs none $STREAM_CONFIGFS"
++    return 1
++  fi
++  if [ ! -d "$STREAM_CONFIGFS/thunderbolt/stream" ]; then
++    note "no $STREAM_CONFIGFS/thunderbolt/stream: the kernel lacks thunderbolt_stream support"
++    return 1
++  fi
++  note "configfs stream interface: ok"
++}
++
++check_devices() {
++  local device
++  for device in /sys/bus/thunderbolt/devices/*; do
++    device="${device##*/}"
++    case "$device" in
++      *:*|*.*) continue ;;
++      [0-9]*-[0-9]*)
++        local name=""
++        [ -f "/sys/bus/thunderbolt/devices/$device/device_name" ] &&
++          name="$(cat "/sys/bus/thunderbolt/devices/$device/device_name")"
++        local label="peer router"
++        case "$device" in
++          *-0) label="host router" ;;
++        esac
++        if [ ! -f "/sys/bus/thunderbolt/devices/$device/authorized" ]; then
++          # Host-to-host peer routers on an unsecured link expose no
++          # authorization attribute: nothing to authorize.
++          local speed=""
++          [ -f "/sys/bus/thunderbolt/devices/$device/rx_speed" ] &&
++            speed=" at $(cat /sys/bus/thunderbolt/devices/$device/rx_speed) x$(cat /sys/bus/thunderbolt/devices/$device/rx_lanes)"
++          note "$label $device has no authorization gate$speed (device_name: ${name:-unknown})"
++        elif [ "$(cat "/sys/bus/thunderbolt/devices/$device/authorized")" = "1" ]; then
++          local speed=""
++          [ -f "/sys/bus/thunderbolt/devices/$device/rx_speed" ] &&
++            speed=" at $(cat /sys/bus/thunderbolt/devices/$device/rx_speed) x$(cat /sys/bus/thunderbolt/devices/$device/rx_lanes)"
++          note "$label $device authorized$speed (device_name: ${name:-unknown})"
++        else
++          note "router $device is NOT authorized: boltctl authorize <uuid>, or set security to none in the BIOS"
++          return 1
++        fi ;;
++    esac
++  done
++  [ -d /sys/bus/thunderbolt/devices/0-0 ] ||
++    fail "no thunderbolt host router: the USB4 controller is not bound to the thunderbolt driver"
++}
++
++check_net() {
++  local tb
++  for tb in /sys/class/net/tb*; do
++    [ -e "$tb" ] || continue
++    note "thunderbolt netdev ${tb##*/} present (control channel can ride the cable)"
++    return 0
++  done
++  note "no tb* netdev: the authenticated TCP control channel needs another network, or load thunderbolt-net"
++}
++
++do_check() {
++  local status=0
++  check_kernel || status=1
++  if [ "$status" -eq 0 ]; then
++    check_configfs || status=1
++    check_devices || status=1
++    check_net || true
++    if ls /dev/tbstream* >/dev/null 2>&1; then
++      note "stream devices present: $(ls /dev/tbstream*)"
++    else
++      note "no /dev/tbstream* yet: run '$0 up' on both hosts"
++    fi
++  fi
++  return "$status"
++}
++
++do_up() {
++  check_kernel || fail "install a 7.2+ kernel first"
++  check_configfs || fail "configfs stream interface missing"
++  check_devices || fail "peer router not ready"
++  local dir
++  dir="$(stream_dir)"
++  local stream="$dir/$STREAM_NAME"
++  note "creating stream $STREAM_NAME under $dir"
++  mkdir -p "$stream"
++  # Automatic HopID allocation on both directions: the stream is
++  # bidirectional, and each rank both sends and receives.
++  echo -1 > "$stream/in_hopid"
++  echo -1 > "$stream/out_hopid"
++  sleep 1
++  if ls /dev/tbstream* >/dev/null 2>&1; then
++    note "ok: $(ls /dev/tbstream*)"
++    note "run the same command on the peer host, then tbstream_probe --mode exchange"
++  else
++    fail "stream directory created but no /dev/tbstream* appeared; create the stream on the peer too (the pair negotiates HopIDs over XDomain properties)"
++  fi
++}
++
++do_down() {
++  local dir
++  dir="$(stream_dir)"
++  local stream="$dir/$STREAM_NAME"
++  [ -d "$stream" ] || fail "no stream $STREAM_NAME under $dir"
++  rmdir "$stream"
++  rmdir "$dir" 2>/dev/null || true
++  note "removed $stream"
++}
++
++case "$COMMAND" in
++  check) do_check ;;
++  up) do_up ;;
++  down) do_down ;;
++esac
+diff --git a/tools/tbstream/tbstream_probe.cpp b/tools/tbstream/tbstream_probe.cpp
+new file mode 100644
+index 0000000..da04cb1
+--- /dev/null
++++ b/tools/tbstream/tbstream_probe.cpp
+@@ -0,0 +1,860 @@
++// USB4STREAM (/dev/tbstreamX) microbenchmark for the TP=2 tbstream
++// transport. Host-only: no HIP, no model. Modes:
++//
++//   loop     one process, a socketpair standing in for the cable; validates
++//            the framing, sizes and integrity end to end. Runs anywhere.
++//   ping     rank 0 writes a frame, rank 1 echoes it; rank 0 reports the
++//            round-trip latency distribution.
++//   bw       rank 0 streams frames one way; both ranks report GB/s.
++//   exchange both ranks write their frame and read the peer's, through three
++//            rotating windows: the shape and timing of one all-reduce step.
++//            A frame larger than the device's rings hangs here, which is the
++//            finding this mode exists to produce.
++//   smoke    alternating odd frame sizes with integrity checks; the stream
++//            must be a byte stream regardless of write boundaries.
++//
++// Rank 1 reaches rank 0's coordination port (--peer HOST, default same
++// host), the ranks exchange their parameters, then all traffic runs on the
++// stream device (--fd, default /dev/tbstream0). See README.md in this
++// directory for the qualification procedure.
++
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <array>
++#include <cerrno>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++
++// Set by --noverify: skip the payload checksums so the measurement shows
++// the link and driver alone, without the probe's own checksum CPU cost.
++bool g_skip_checksums = false;
++
++constexpr std::uint32_t kHelloMagic = 0x47504248U;  // "GPBH"
++constexpr std::uint32_t kHelloVersion = 1;
++constexpr std::uint32_t kFrameMagic = 0x47504246U;  // "GPBF"
++constexpr std::uint64_t kDataOffset = 64;
++constexpr auto kTimeout = std::chrono::seconds(30);
++
++struct Hello {
++  std::uint32_t magic{kHelloMagic};
++  std::uint32_t version{kHelloVersion};
++  std::uint32_t rank{0};
++  std::uint32_t sizes_checksum{0};
++  std::uint32_t frames{0};
++  std::uint32_t links{1};
++};
++
++struct FrameHeader {
++  std::uint32_t magic{kFrameMagic};
++  std::uint32_t version{1};
++  std::uint32_t checksum{0};
++  std::uint32_t reserved{0};
++  std::uint64_t sequence{0};
++  std::uint64_t bytes{0};
++};
++
++static_assert(sizeof(FrameHeader) <= kDataOffset);
++
++int Fail(const std::string& message) {
++  std::fprintf(stderr, "tbstream_probe: %s\n", message.c_str());
++  return 1;
++}
++
++std::string ErrnoText(const char* what) {
++  return std::string(what) + ": " + std::strerror(errno);
++}
++
++std::uint32_t Checksum(const std::uint8_t* data, std::size_t bytes,
++                       std::uint32_t seed) {
++  std::uint32_t hash = seed;
++  for (std::size_t i = 0; i < bytes; ++i) {
++    hash = (hash ^ data[i]) * 16777619U;
++  }
++  return hash;
++}
++
++void FillPayload(std::uint8_t* data, std::size_t bytes, std::uint64_t seed) {
++  std::uint32_t state = static_cast<std::uint32_t>(seed) | 1U;
++  for (std::size_t i = 0; i < bytes; ++i) {
++    state = state * 1103515245U + 12345U;
++    data[i] = static_cast<std::uint8_t>(state >> 16);
++  }
++}
++
++std::vector<std::size_t> ParseSizes(const std::string& text) {
++  std::vector<std::size_t> sizes;
++  std::size_t start = 0;
++  while (start <= text.size()) {
++    const std::size_t comma = text.find(',', start);
++    const std::string part = text.substr(
++        start, comma == std::string::npos ? std::string::npos : comma - start);
++    if (!part.empty()) {
++      sizes.push_back(
++          static_cast<std::size_t>(std::strtoull(part.c_str(), nullptr, 10)));
++    }
++    if (comma == std::string::npos) {
++      break;
++    }
++    start = comma + 1;
++  }
++  if (sizes.empty()) {
++    sizes.push_back(10240);
++  }
++  return sizes;
++}
++
++std::vector<std::string> ParseDevices(const std::string& text) {
++  std::vector<std::string> devices;
++  std::size_t start = 0;
++  while (start <= text.size()) {
++    const std::size_t comma = text.find(',', start);
++    std::string part = text.substr(
++        start, comma == std::string::npos ? std::string::npos : comma - start);
++    while (!part.empty() && part.back() == ' ') {
++      part.pop_back();
++    }
++    if (!part.empty()) {
++      devices.push_back(part);
++    }
++    if (comma == std::string::npos) {
++      break;
++    }
++    start = comma + 1;
++  }
++  if (devices.empty()) {
++    devices.push_back("/dev/tbstream0");
++  }
++  return devices;
++}
++
++std::uint32_t SizesChecksum(const std::vector<std::size_t>& sizes) {
++  std::uint32_t sum = 0;
++  for (const std::size_t size : sizes) {
++    sum = sum * 31U + static_cast<std::uint32_t>(size);
++  }
++  return sum;
++}
++
++/// A framed exchange over one ordered byte stream: a 64-byte header followed
++/// by the payload. Writes poll under a deadline on the nonblocking
++/// descriptor; reads use a second, blocking descriptor, because the device
++/// reports arriving frames through the blocking read path only (its poll
++/// mask and nonblocking reads stay quiet for frames that arrive while no
++/// reader is parked in read(2)).
++class Stream {
++public:
++  Stream(int write_fd, int read_fd) : fd_(write_fd), read_fd_(read_fd) {}
++
++  [[nodiscard]] std::uint64_t written() const noexcept { return written_; }
++  [[nodiscard]] std::uint64_t read() const noexcept { return read_; }
++
++  [[nodiscard]] bool WriteFrame(std::uint64_t sequence, const void* payload,
++                                std::size_t bytes, std::string* error) {
++    const std::uint32_t checksum =
++        g_skip_checksums
++            ? 0U
++            : Checksum(static_cast<const std::uint8_t*>(payload), bytes,
++                       static_cast<std::uint32_t>(sequence));
++    const FrameHeader header{
++        .checksum = checksum,
++        .sequence = sequence,
++        .bytes = bytes,
++    };
++    std::uint8_t frame[kDataOffset];
++    std::memcpy(frame, &header, sizeof(header));
++    if (!SendAll(frame, sizeof(frame), error) ||
++        (bytes != 0 && !SendAll(payload, bytes, error))) {
++      return false;
++    }
++    written_ += kDataOffset + bytes;
++    return true;
++  }
++
++  [[nodiscard]] bool ReadFrame(std::uint64_t expected_sequence, void* payload,
++                               std::size_t capacity, std::size_t* bytes,
++                               std::string* error) {
++    std::uint8_t head[kDataOffset];
++    if (!RecvAll(head, sizeof(head), error)) {
++      return false;
++    }
++    FrameHeader header{};
++    std::memcpy(&header, head, sizeof(header));
++    if (header.magic != kFrameMagic || header.version != 1 ||
++        header.sequence != expected_sequence || header.bytes > capacity) {
++      *error = "frame header mismatch: sequence " +
++               std::to_string(header.sequence) + " of " +
++               std::to_string(header.bytes) + " bytes";
++      return false;
++    }
++    if (header.bytes != 0 && !RecvAll(payload, header.bytes, error)) {
++      return false;
++    }
++    const std::uint32_t checksum =
++        g_skip_checksums
++            ? header.checksum
++            : Checksum(static_cast<const std::uint8_t*>(payload),
++                       header.bytes,
++                       static_cast<std::uint32_t>(expected_sequence));
++    if (checksum != header.checksum) {
++      *error = "frame checksum mismatch at sequence " +
++               std::to_string(expected_sequence);
++      return false;
++    }
++    *bytes = header.bytes;
++    read_ += kDataOffset + header.bytes;
++    return true;
++  }
++
++private:
++  [[nodiscard]] bool SendAll(const void* data, std::size_t bytes,
++                             std::string* error) {
++    const auto* cursor = static_cast<const std::uint8_t*>(data);
++    std::size_t sent = 0;
++    const auto deadline = std::chrono::steady_clock::now() + kTimeout;
++    // Spin before sleeping in poll(2): a full ring eases within microseconds
++    // once the peer drains it, and the poll wakeup pays the interrupt
++    // pacing. Mirrors the transport's write path.
++    const auto spin_deadline = std::chrono::steady_clock::now() +
++                                std::chrono::milliseconds(5);
++    while (sent < bytes) {
++      const ssize_t n = ::write(fd_, cursor + sent, bytes - sent);
++      if (n > 0) {
++        sent += static_cast<std::size_t>(n);
++        continue;
++      }
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        if (std::chrono::steady_clock::now() < spin_deadline) {
++#if defined(__x86_64__) || defined(__i386__)
++          __builtin_ia32_pause();
++#endif
++          continue;
++        }
++        pollfd p{.fd = fd_, .events = POLLOUT, .revents = 0};
++        const int result = ::poll(&p, 1, 1000);
++        if (result < 0 && errno != EINTR) {
++          *error = ErrnoText("write poll");
++          return false;
++        }
++        if (std::chrono::steady_clock::now() >= deadline) {
++          *error = "write timed out (peer not draining, or rings full)";
++          return false;
++        }
++        continue;
++      }
++      *error = ErrnoText("write");
++      return false;
++    }
++    return true;
++  }
++
++  [[nodiscard]] bool RecvAll(void* data, std::size_t bytes,
++                             std::string* error) {
++    auto* cursor = static_cast<std::uint8_t*>(data);
++    std::size_t received = 0;
++    const auto start = std::chrono::steady_clock::now();
++    while (received < bytes) {
++      const ssize_t n =
++          ::read(read_fd_, cursor + received, bytes - received);
++      if (n > 0) {
++        received += static_cast<std::size_t>(n);
++        continue;
++      }
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        continue;
++      }
++      if (n == 0) {
++        // The device reports an empty ring as a zero-byte read; the frame
++        // may still be in flight. Spin briefly so an imminent arrival pays
++        // no sleep granularity, then pause and read again.
++        const auto spin_deadline = start + std::chrono::milliseconds(5);
++        if (std::chrono::steady_clock::now() < spin_deadline) {
++#if defined(__x86_64__) || defined(__i386__)
++          __builtin_ia32_pause();
++#endif
++        } else {
++          ::usleep(100);
++        }
++        continue;
++      }
++      *error = ErrnoText("read");
++      return false;
++    }
++    return true;
++  }
++
++  int fd_;
++  int read_fd_;
++  std::uint64_t written_{0};
++  std::uint64_t read_{0};
++};
++
++/// The TCP coordination channel: ranks exchange their parameters and a go
++/// signal before touching the stream device. It closes after that.
++class Pairing {
++public:
++  Pairing() = default;
++  explicit Pairing(int fd) : fd_(fd) {}
++  Pairing(const Pairing&) = delete;
++  Pairing& operator=(const Pairing&) = delete;
++  Pairing(Pairing&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
++  Pairing& operator=(Pairing&& other) noexcept {
++    if (this != &other) {
++      Close();
++      fd_ = other.fd_;
++      other.fd_ = -1;
++    }
++    return *this;
++  }
++  ~Pairing() { Close(); }
++
++  [[nodiscard]] int fd() const noexcept { return fd_; }
++
++  void Close() noexcept {
++    if (fd_ >= 0) {
++      ::close(fd_);
++      fd_ = -1;
++    }
++  }
++
++  [[nodiscard]] static Pairing Listen(std::uint16_t port, std::string* error) {
++    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0) {
++      *error = ErrnoText("coordination socket");
++      return Pairing();
++    }
++    int reuse = 1;
++    (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
++    sockaddr_in address{};
++    address.sin_family = AF_INET;
++    address.sin_addr.s_addr = htonl(INADDR_ANY);
++    address.sin_port = htons(port);
++    if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
++            0 ||
++        ::listen(fd, 1) != 0) {
++      *error = ErrnoText("coordination listen");
++      ::close(fd);
++      return Pairing();
++    }
++    int peer = ::accept(fd, nullptr, nullptr);
++    ::close(fd);
++    if (peer < 0) {
++      *error = ErrnoText("coordination accept");
++      return Pairing();
++    }
++    return Pairing(peer);
++  }
++
++  [[nodiscard]] static Pairing Connect(const std::string& host,
++                                       std::uint16_t port,
++                                       std::string* error) {
++    sockaddr_in address{};
++    address.sin_family = AF_INET;
++    address.sin_port = htons(port);
++    if (::inet_pton(AF_INET, host.c_str(), &address.sin_addr) != 1) {
++      *error = "coordination peer is not an IPv4 address: " + host;
++      return Pairing();
++    }
++    const auto deadline = std::chrono::steady_clock::now() + kTimeout;
++    for (;;) {
++      int fd = ::socket(AF_INET, SOCK_STREAM, 0);
++      if (fd >= 0 &&
++          ::connect(fd, reinterpret_cast<sockaddr*>(&address),
++                    sizeof(address)) == 0) {
++        return Pairing(fd);
++      }
++      if (fd >= 0) {
++        ::close(fd);
++      }
++      if (std::chrono::steady_clock::now() >= deadline) {
++        *error = "coordination connect timed out";
++        return Pairing();
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    }
++  }
++
++  [[nodiscard]] bool Exchange(const Hello& mine, Hello* peers,
++                              std::string* error) const {
++    if (!SendAll(&mine, sizeof(mine), error) ||
++        !RecvAll(peers, sizeof(*peers), error) ||
++        peers->magic != kHelloMagic || peers->version != kHelloVersion ||
++        peers->sizes_checksum != mine.sizes_checksum ||
++        peers->frames != mine.frames || peers->rank == mine.rank ||
++        peers->links != mine.links) {
++      if (error->empty()) {
++        *error = "coordination hello mismatch (same --bytes/--frames/--fd "
++                 "count and opposite --rank on both ends?)";
++      }
++      return false;
++    }
++    const std::uint32_t go = 1;
++    std::uint32_t ready = 0;
++    return SendAll(&go, sizeof(go), error) &&
++           RecvAll(&ready, sizeof(ready), error) && ready == go;
++  }
++
++  /// The second barrier, after both ranks opened the stream device: the
++  /// sender must not write before the peer's reader exists.
++  [[nodiscard]] bool Ready(std::string* error) const {
++    const std::uint32_t go = 2;
++    std::uint32_t peer_go = 0;
++    return SendAll(&go, sizeof(go), error) &&
++           RecvAll(&peer_go, sizeof(peer_go), error) && peer_go == go;
++  }
++
++private:
++  [[nodiscard]] bool SendAll(const void* data, std::size_t bytes,
++                             std::string* error) const {
++    const auto* cursor = static_cast<const std::uint8_t*>(data);
++    std::size_t sent = 0;
++    while (sent < bytes) {
++      const ssize_t n =
++          ::send(fd_, cursor + sent, bytes - sent, MSG_NOSIGNAL);
++      if (n <= 0) {
++        if (n < 0 && errno == EINTR) {
++          continue;
++        }
++        *error = ErrnoText("coordination send");
++        return false;
++      }
++      sent += static_cast<std::size_t>(n);
++    }
++    return true;
++  }
++
++  [[nodiscard]] bool RecvAll(void* data, std::size_t bytes,
++                             std::string* error) const {
++    auto* cursor = static_cast<std::uint8_t*>(data);
++    std::size_t received = 0;
++    while (received < bytes) {
++      const ssize_t n = ::recv(fd_, cursor + received, bytes - received, 0);
++      if (n <= 0) {
++        if (n < 0 && errno == EINTR) {
++          continue;
++        }
++        *error = ErrnoText("coordination receive");
++        return false;
++      }
++      received += static_cast<std::size_t>(n);
++    }
++    return true;
++  }
++
++  int fd_{-1};
++};
++
++void ReportMicros(const std::vector<double>& micros) {
++  if (micros.empty()) {
++    return;
++  }
++  std::vector<double> sorted = micros;
++  std::sort(sorted.begin(), sorted.end());
++  const auto pick = [&](double fraction) {
++    return sorted[std::min(
++        sorted.size() - 1,
++        static_cast<std::size_t>(fraction * static_cast<double>(
++                                                  sorted.size())))];
++  };
++  std::printf("  n=%zu p50=%.1f p90=%.1f p99=%.1f max=%.1f us\n",
++              sorted.size(), pick(0.50), pick(0.90), pick(0.99),
++              sorted.back());
++}
++
++void ReportBandwidth(std::uint64_t bytes,
++                     std::chrono::steady_clock::duration elapsed,
++                     const char* what) {
++  const double seconds =
++      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
++          .count();
++  std::printf("  %s: %.2f GB/s (%.1f ms, %llu MiB)\n", what,
++              static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0) /
++                  seconds,
++              seconds * 1000.0,
++              static_cast<unsigned long long>(bytes >> 20));
++}
++
++/// Three buffers, like the transport's exchange windows, so a frame never
++/// lands in a buffer the previous exchange may still be reading.
++class Windows {
++public:
++  explicit Windows(std::size_t window_bytes)
++      : buffer_(std::make_unique<std::uint8_t[]>(3 * window_bytes)),
++        window_bytes_(window_bytes) {}
++
++  [[nodiscard]] std::uint8_t* At(std::uint64_t sequence) const {
++    return buffer_.get() + (sequence % 3) * window_bytes_;
++  }
++
++private:
++  std::unique_ptr<std::uint8_t[]> buffer_;
++  std::size_t window_bytes_;
++};
++
++int RunLoop(const std::vector<std::size_t>& sizes, std::uint32_t frames,
++            std::size_t links) {
++  std::vector<std::array<int, 2>> fds(links);
++  for (auto& pair : fds) {
++    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
++                     pair.data()) != 0) {
++      return Fail(ErrnoText("socketpair"));
++    }
++  }
++  std::printf("loop: %zu socketpair(s) standing in for the stream device(s)\n",
++              links);
++  // One responder per link, each serving the frames striped to its link.
++  std::vector<std::thread> responders;
++  for (std::size_t k = 0; k < links; ++k) {
++    responders.emplace_back([k, links, &fds, sizes, frames] {
++      Stream stream(fds[k][1], fds[k][1]);
++      std::string error;
++      for (std::size_t size : sizes) {
++        Windows windows(std::max<std::size_t>(size, 1));
++        for (std::uint32_t i = static_cast<std::uint32_t>(k); i < frames;
++             i += static_cast<std::uint32_t>(links)) {
++          std::size_t bytes = 0;
++          if (!stream.ReadFrame(i, windows.At(i), size, &bytes, &error) ||
++              !stream.WriteFrame(i, windows.At(i), bytes, &error)) {
++            Fail("loop responder: " + error);
++            ::shutdown(fds[k][1], SHUT_RDWR);
++            return;
++          }
++        }
++      }
++      ::close(fds[k][1]);
++    });
++  }
++  std::vector<Stream> streams;
++  for (std::size_t k = 0; k < links; ++k) {
++    streams.emplace_back(fds[k][0], fds[k][0]);
++  }
++  std::string error;
++  int status = 0;
++  for (std::size_t size : sizes) {
++    Windows windows(std::max<std::size_t>(size, 1));
++    const auto payload = std::make_unique<std::uint8_t[]>(size + 1);
++    FillPayload(payload.get(), size, 1);
++    std::vector<double> micros;
++    for (std::uint32_t i = 0; i < frames; ++i) {
++      Stream& stream = streams[i % links];
++      const auto start = std::chrono::steady_clock::now();
++      if (!stream.WriteFrame(i, payload.get(), size, &error)) {
++        status = Fail("loop requester write: " + error);
++        break;
++      }
++      std::size_t bytes = 0;
++      if (!stream.ReadFrame(i, windows.At(i), size, &bytes, &error)) {
++        status = Fail("loop requester read: " + error);
++        break;
++      }
++      const auto end = std::chrono::steady_clock::now();
++      micros.push_back(
++          std::chrono::duration_cast<std::chrono::duration<double>>(end -
++                                                                    start)
++              .count() *
++          1e6);
++    }
++    if (status != 0) {
++      break;
++    }
++    std::printf("loop %zu bytes:", size);
++    ReportMicros(micros);
++  }
++  if (status != 0) {
++    // Wake the responders out of any read so the joins are prompt.
++    for (auto& pair : fds) {
++      ::shutdown(pair[0], SHUT_RDWR);
++    }
++  }
++  for (std::thread& responder : responders) {
++    responder.join();
++  }
++  for (auto& pair : fds) {
++    ::close(pair[0]);
++  }
++  if (status == 0) {
++    std::printf("loop: ok\n");
++  }
++  return status;
++}
++
++int RunPair(const std::string& mode, std::uint32_t rank,
++            const std::string& peer, std::uint16_t port,
++            const std::vector<std::string>& devices,
++            const std::vector<std::size_t>& sizes, std::uint32_t frames) {
++  const std::size_t links = devices.size();
++  std::string error;
++  Pairing pairing = rank == 0 ? Pairing::Listen(port, &error)
++                              : Pairing::Connect(peer, port, &error);
++  if (pairing.fd() < 0) {
++    return Fail("pairing: " + error);
++  }
++  const Hello mine{.rank = rank,
++                   .sizes_checksum = SizesChecksum(sizes),
++                   .frames = frames,
++                   .links = static_cast<std::uint32_t>(links)};
++  Hello peers{};
++  if (!pairing.Exchange(mine, &peers, &error)) {
++    return Fail("pairing: " + error);
++  }
++  // Every link gets its own nonblocking write descriptor and blocking read
++  // descriptor, mirroring the single-stream transport per device.
++  std::vector<std::array<int, 2>> opened;
++  auto close_all = [&opened]() {
++    for (const auto& pair : opened) {
++      ::close(pair[0]);
++      ::close(pair[1]);
++    }
++  };
++  for (const std::string& device : devices) {
++    const int fd = ::open(device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    if (fd < 0) {
++      close_all();
++      return Fail("open " + device + ": " + std::strerror(errno) +
++                  " (is the USB4STREAM stream configured? see README.md)");
++    }
++    const int read_fd = ::open(device.c_str(), O_RDWR | O_CLOEXEC);
++    if (read_fd < 0) {
++      ::close(fd);
++      close_all();
++      return Fail("open " + device + " for reading: " +
++                  std::strerror(errno));
++    }
++    struct stat device_stat{};
++    if (::fstat(fd, &device_stat) != 0 || !S_ISCHR(device_stat.st_mode)) {
++      ::close(fd);
++      ::close(read_fd);
++      close_all();
++      return Fail(device + " is not a character device");
++    }
++    opened.push_back({fd, read_fd});
++  }
++  // A second barrier after both ranks opened every device: the driver
++  // strands data a rank writes before its peer opened, so no frame may move
++  // until every fd exists.
++  if (!pairing.Ready(&error)) {
++    close_all();
++    return Fail("pairing readiness: " + error);
++  }
++  pairing.Close();
++  std::vector<Stream> streams;
++  for (const auto& pair : opened) {
++    streams.emplace_back(pair[0], pair[1]);
++  }
++  std::printf("%s rank %u over %zu link(s):", mode.c_str(), rank, links);
++  for (const std::string& device : devices) {
++    std::printf(" %s", device.c_str());
++  }
++  std::printf("\n");
++  const auto run_start = std::chrono::steady_clock::now();
++  for (std::size_t size : sizes) {
++    Windows windows(std::max<std::size_t>(size, 1));
++    const auto payload = std::make_unique<std::uint8_t[]>(size + 1);
++    FillPayload(payload.get(), size, 7);
++    std::vector<double> micros;
++    const auto total_start = std::chrono::steady_clock::now();
++    if (mode == "ping" || mode == "smoke") {
++      // Rank 0 drives; rank 1 echoes every frame it reads.
++      if (rank == 0) {
++        for (std::uint32_t i = 0; i < frames; ++i) {
++          Stream& stream = streams[i % links];
++          const std::size_t frame_bytes =
++              mode == "smoke" && size > 1
++                  ? ((i * 7919U + size) % size) | 1U
++                  : size;
++          const auto start = std::chrono::steady_clock::now();
++          if (!stream.WriteFrame(i, payload.get(), frame_bytes, &error)) {
++            return Fail("ping write: " + error);
++          }
++          std::size_t bytes = 0;
++          if (!stream.ReadFrame(i, windows.At(i), size, &bytes, &error)) {
++            return Fail("ping read: " + error);
++          }
++          const auto end = std::chrono::steady_clock::now();
++          if (bytes != frame_bytes) {
++            return Fail("echo size mismatch");
++          }
++          micros.push_back(
++              std::chrono::duration_cast<std::chrono::duration<double>>(
++                  end - start)
++                  .count() *
++              1e6);
++        }
++      } else {
++        for (std::uint32_t i = 0; i < frames; ++i) {
++          Stream& stream = streams[i % links];
++          std::size_t bytes = 0;
++          if (!stream.ReadFrame(i, windows.At(i), size, &bytes, &error)) {
++            return Fail("echo read: " + error);
++          }
++          if (!stream.WriteFrame(i, windows.At(i), bytes, &error)) {
++            return Fail("echo write: " + error);
++          }
++        }
++      }
++    } else if (mode == "bw") {
++      // Rank 0 streams one way; rank 1 drains.
++      const auto start = std::chrono::steady_clock::now();
++      if (rank == 0) {
++        for (std::uint32_t i = 0; i < frames; ++i) {
++          Stream& stream = streams[i % links];
++          if (!stream.WriteFrame(i, payload.get(), size, &error)) {
++            return Fail("bw write: " + error);
++          }
++        }
++      } else {
++        for (std::uint32_t i = 0; i < frames; ++i) {
++          Stream& stream = streams[i % links];
++          std::size_t bytes = 0;
++          if (!stream.ReadFrame(i, windows.At(i), size, &bytes, &error)) {
++            return Fail("bw read: " + error);
++          }
++        }
++      }
++      const auto end = std::chrono::steady_clock::now();
++      std::printf("%s %zu bytes\n", mode.c_str(), size);
++      ReportBandwidth(static_cast<std::uint64_t>(size) * frames, end - start,
++                      rank == 0 ? "sent" : "received");
++      continue;
++    } else {
++      // exchange: both ranks write their frame, then read the peer's,
++      // through the rotating windows: one all-reduce step.
++      for (std::uint32_t i = 0; i < frames; ++i) {
++        Stream& stream = streams[i % links];
++        const auto start = std::chrono::steady_clock::now();
++        if (!stream.WriteFrame(i, payload.get(), size, &error)) {
++          return Fail("exchange write: " + error);
++        }
++        std::size_t bytes = 0;
++        if (!stream.ReadFrame(i, windows.At(i), size, &bytes, &error)) {
++          return Fail("exchange read: " + error);
++        }
++        const auto end = std::chrono::steady_clock::now();
++        micros.push_back(
++            std::chrono::duration_cast<std::chrono::duration<double>>(
++                end - start)
++                .count() *
++            1e6);
++      }
++    }
++    std::printf("%s %zu bytes:\n", mode.c_str(), size);
++    ReportMicros(micros);
++    ReportBandwidth(static_cast<std::uint64_t>(size) * frames * 2,
++                    std::chrono::steady_clock::now() - total_start,
++                    "both directions");
++  }
++  if (links > 1) {
++    const auto elapsed = std::chrono::steady_clock::now() - run_start;
++    for (std::size_t k = 0; k < links; ++k) {
++      ReportBandwidth(streams[k].written() + streams[k].read(), elapsed,
++                      ("link " + std::to_string(k) + " both directions")
++                          .c_str());
++    }
++  }
++  close_all();
++  std::printf("%s rank %u: ok\n", mode.c_str(), rank);
++  return 0;
++}
++
++void Usage() {
++  std::printf(
++      "usage: tbstream_probe --mode loop|ping|bw|exchange|smoke\n"
++      "                      [--rank 0|1] [--peer HOST] [--port 18530]\n"
++      "                      [--fd /dev/tbstream0[,/dev/tbstream1...]]\n"
++      "                      [--bytes 10240[,5242880]] [--frames 1000]\n"
++      "                      [--stripe N] [--noverify]\n"
++      "multiple --fd paths stripe frames round-robin over that many links\n"
++      "(--stripe must match the --fd count). loop runs in one process over\n"
++      "socketpairs; every other mode needs one process per rank, rank 1\n"
++      "given rank 0's address in --peer.\n");
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  std::string mode = "loop";
++  std::uint32_t rank = 0;
++  std::string peer = "127.0.0.1";
++  std::uint16_t port = 18530;
++  std::string devices_text = "/dev/tbstream0";
++  std::string bytes_text = "10240";
++  std::uint32_t frames = 1000;
++  std::uint32_t stripe = 0;
++  for (int i = 1; i < argc; ++i) {
++    const std::string arg = argv[i];
++    const auto next = [&]() -> std::string {
++      return i + 1 < argc ? argv[++i] : std::string();
++    };
++    if (arg == "--mode") {
++      mode = next();
++    } else if (arg == "--rank") {
++      rank = static_cast<std::uint32_t>(
++          std::strtoul(next().c_str(), nullptr, 10));
++    } else if (arg == "--peer") {
++      peer = next();
++    } else if (arg == "--port") {
++      port = static_cast<std::uint16_t>(
++          std::strtoul(next().c_str(), nullptr, 10));
++    } else if (arg == "--fd") {
++      devices_text = next();
++    } else if (arg == "--stripe") {
++      stripe = static_cast<std::uint32_t>(
++          std::strtoul(next().c_str(), nullptr, 10));
++    } else if (arg == "--bytes") {
++      bytes_text = next();
++    } else if (arg == "--noverify") {
++      g_skip_checksums = true;
++    } else if (arg == "--frames") {
++      frames = static_cast<std::uint32_t>(
++          std::strtoul(next().c_str(), nullptr, 10));
++    } else if (arg == "--help" || arg == "-h") {
++      Usage();
++      return 0;
++    } else {
++      std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
++      Usage();
++      return 2;
++    }
++  }
++  if (frames == 0 || rank > 1) {
++    std::fprintf(stderr, "invalid --frames or --rank\n");
++    return 2;
++  }
++  const std::vector<std::size_t> sizes = ParseSizes(bytes_text);
++  const std::vector<std::string> devices = ParseDevices(devices_text);
++  if (stripe != 0 && stripe != devices.size()) {
++    std::fprintf(stderr, "--stripe %u does not match the %zu --fd paths\n",
++                 stripe, devices.size());
++    return 2;
++  }
++  if (mode == "loop") {
++    return RunLoop(sizes, frames, devices.size());
++  }
++  if (mode != "ping" && mode != "bw" && mode != "exchange" &&
++      mode != "smoke") {
++    std::fprintf(stderr, "unknown mode: %s\n", mode.c_str());
++    Usage();
++    return 2;
++  }
++  return RunPair(mode, rank, peer, port, devices, sizes, frames);
++}

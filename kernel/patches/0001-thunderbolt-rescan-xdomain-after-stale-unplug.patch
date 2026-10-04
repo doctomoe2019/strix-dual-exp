@@ -1,0 +1,25 @@
+--- a/drivers/thunderbolt/tb.c	2026-10-03 11:34:54.651690394 +0200
++++ b/drivers/thunderbolt/tb.c	2026-10-04 14:31:15.320015659 +0200
+@@ -2491,6 +2491,22 @@
+ 			__tb_disconnect_xdomain_paths(tb, xd, -1, -1, -1, -1);
+ 			tb_xdomain_put(xd);
+ 			tb_port_unconfigure_xdomain(port);
++			/*
++			 * Fast replug: the stale unplug event can be
++			 * processed after the new plug event (inversion),
++			 * leaving the link up with the XDomain removed and
++			 * no further scan scheduled. If the link is still
++			 * connected, rescan now to recreate the XDomain;
++			 * otherwise queue a synthetic plug event to catch
++			 * a cable returning within the window.
++			 */
++			if (tb_wait_for_port(port, false) > 0) {
++				tb_port_dbg(port,
++					    "link still up after xdomain unplug, rescanning\n");
++				tb_scan_port(port);
++			} else {
++				tb_queue_hotplug(tb, ev->route, ev->port, false);
++			}
+ 		} else if (tb_port_is_dpout(port) || tb_port_is_dpin(port)) {
+ 			tb_dp_resource_unavailable(tb, port, "adapter unplug");
+ 		} else if (!port->port) {
