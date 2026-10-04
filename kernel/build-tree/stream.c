@@ -584,7 +584,7 @@ static int tbstream_dev_send_close(struct tbstream_dev *sdev)
  * stock lowest-free allocator, re-attach after a self-heal event
  * wedged near-deterministically; with rotation, ~25% per restart).
  * Rotation is a mitigation, not a cure — the wedge trigger is
- * cable-end correlated (see docs/investigation-log.md).
+ * cable-end correlated (see docs/wedge-investigation.md).
  */
 #define TBSTREAM_HOP_ROT_MIN	10
 #define TBSTREAM_HOP_ROT_MAX	31

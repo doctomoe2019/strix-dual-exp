@@ -1,3 +1,13 @@
+# The link robustness investigation (one chapter of strix-dual-exp)
+
+This is the experiment record of the teardown-wedge investigation —
+the robustness chapter of the overall TP2-over-USB4v2 project described
+in the top-level README and `transport-and-serving.md`. The transport
+itself works; this documents what it took to make the *link* survive
+production use, and what the failure actually was.
+
+---
+
 # TBSTREAM wedge investigation — sanitized log
 
 Hardware: two identical AMD Strix Halo mini-PCs (board SHWSA-class, USB4
