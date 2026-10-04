@@ -46,16 +46,20 @@ and no copies. Provenance in `docs/performance.md`.
 **2. gufo serving over it** — two-rank tensor parallelism with all
 cross-rank traffic on the stream transport, Qwen3.8-Flash-Next Q4:
 
-| | Single host | **Dual-host TP2 (this work)** | Gain |
+| | Single host (benchmark corpus) | **Dual-host TP2 (recorded requests)** | Gain |
 | --- | ---: | ---: | ---: |
-| Prefill pp, depth 0 | 1628.5 tok/s | **up to 2195.5 tok/s** | +35 % |
-| Prefill pp, long context | 1335.9 tok/s @ 131k | 2104.6 tok/s @ 61k | +58 % |
-| Decode tg (single user) | 25.9 AR / 59.2 MTP-rep | **63.3 tok/s (MTP)** | up to +7 % vs best single-host mode |
+| Prefill pp @ ~0 depth | 1628.5 tok/s | — | — |
+| Prefill pp @ ~61–65k depth | 1316.7 tok/s | **2104.6–2195.5 tok/s** | **+60–67 %** |
+| Decode tg, mixed @ ~61–65k | 32.6 tok/s | 62.6 tok/s (32-tok window, 77 % acceptance) | indicative only¹ |
+| Decode tg, repetitive @ ~61–65k | 46.1 tok/s | 62.6 tok/s (same request) | indicative only¹ |
 | Fits at 262 144-token context | Q4 only (87 GB) | **Q8 as TP2 shards**, loaded in ~36 s | — |
 
-All dual-host numbers are recorded artifacts (39 requests, width-1,
-MTP acceptance 60–87 %); multi-user batching on the pair is the next
-benchmark to run. Provenance in `docs/performance.md`.
+¹ The dual-host numbers so far come from the TP2 qualification
+harness (width-1, short decode windows, synthetic prompts), not from
+gufo's benchmark corpora with timed tg128 windows — so tg gains are
+directional, not benchmark-grade. Prefill is compute-bound and
+depth-matched, making those gains solid. **Running gufo's bench
+harness on the pair is the pending benchmark** (see Ongoing work).
 
 **3. A link that survives its own hardware.** The Barlow Ridge
 host-to-host link has a failure mode where stream teardown desyncs
@@ -75,7 +79,11 @@ serving continuing through the event.
   control-channel stall race quarantined behind the XDomain workqueue
   is worth root-fixing (see `docs/upstream/`).
 - **Continue the optimization program** to fully exhaust whatever
-  performance is still gainable in the transport and serving path.
+  performance is still gainable in the transport and serving path —
+  starting with benchmark-grade dual-host numbers (gufo's bench
+  harness over the pair, tg128 windows, both corpora) and multi-user
+  batching, so the decode-side gains are measured as rigorously as
+  the prefill side.
 
 ## What is in here
 

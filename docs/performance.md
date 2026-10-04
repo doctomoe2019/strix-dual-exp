@@ -35,26 +35,35 @@ link is 40 Gbit/s (= 5 GB/s line rate) dual-lane Gen4 class.
 
 ## Dual-host TP2 serving (Qwen3.8-Flash-Next Q4)
 
-From the phase-3 serving logs on the pair (39 completed requests,
-single-width batches; archived under `evidence/` and the pre-saga
-archive — key requests shown):
+**Methodology caveat first:** the dual-host requests recorded so far
+come from the TP2 *qualification* harness (width-1, short decode
+windows of 32–512 tokens, synthetic prompts), not from gufo's
+benchmark corpora with timed tg128 decode windows. Prefill numbers
+are compute-bound and depth-comparable; decode numbers are
+indicative until the bench harness runs on the pair.
 
-| Metric | Value | Source |
-| --- | ---: | --- |
-| Prefill (pp), maximum recorded | **2195.5 tok/s** | phase-3 logs |
-| Prefill @ 24 900-token prompt | 2169.0 tok/s, TTFT 11.5 s | `baseline-r0.log` |
-| Prefill @ 61 010-token prompt | 2104.6 tok/s, TTFT 29.1 s | `baseline-r0.log` |
-| Decode (tg), maximum recorded | **63.3 tok/s** | phase-3 logs |
-| Queue overhead | ≤ 87 ms (typically < 10 ms) | phase-3 logs |
+Recorded requests (phase-3 logs, `evidence/` + pre-saga archive):
 
-Notes:
+| Request | Prompt tokens | pp (tok/s) | tg (tok/s) | Window / MTP acceptance | Source |
+| --- | ---: | ---: | ---: | --- | --- |
+| r4-class long prefill | 61 010 | **2104.6** | 62.6 | 32 tok, 76.7 % | `baseline-r0.log` (Q4 confirmed by loader line) |
+| long prefill (same depth) | 61 010 | **2195.5** | 62.3 | 32 tok | `serve-q8b-r0.log` (target model is Q4_K_XL; filename refers to the draft variant) |
+| long prefill | 24 900 | 2169.0 | 48.2 | 32 tok, 60.7 % | `baseline-r0.log` |
+| short chat | 69 | 178.8 | **63.3** | 64 tok, 71.4 % | `serve-r0-m3.log` |
+| short chat | 70 | 144.5 | 61.6 | 461 tok, 86.6 % | `baseline-r0.log` |
 
-- These are width-1 requests; multi-user/batched decode has not been
-  re-benchmarked end-to-end on the pair yet (the single-host gufo
-  multi-user MTP table reaches 75.9 tok/s at 4 users, 106.5 at 8 —
-  the dual-host equivalents are pending measurement).
-- All requests above ran MTP speculative decoding (draft acceptance
-  60–87 % in the samples shown).
+Depth-matched comparison against gufo's single-host benchmark tables
+(same model, benchmark corpora, tg128):
+
+| Depth | Single-host pp | Dual pp | pp gain | Single-host tg (mixed/rep) | Dual tg | tg note |
+| ---: | ---: | ---: | ---: | --- | ---: | --- |
+| ~0 | 1628.5 | — | — | 32.1 / 59.2 | — | — |
+| ~61–65k | 1316.7 | 2104.6–2195.5 | **+60–67 %** | 32.6 / 46.1 | 62.6 | indicative only (¹) |
+| ~131k | 1335.9 | — | — | 34.2 / 45.0 | — | — |
+
+¹ Qualification prompt vs benchmark corpus; 32-token decode window.
+Pending: run gufo's bench harness on the pair (both corpora, tg128,
+multi-user batching) for benchmark-grade decode numbers.
 
 ## Context: single-host reference (same model, same gufo)
 
@@ -67,5 +76,6 @@ From gufo's `BENCHMARKS.md` (single Strix host, no TP2):
 | Decode tg, single user | 25.9 (AR) / 59.2 (MTP repetitive) | 63.3 (MTP) |
 
 The dual-host pair also unlocks context/quant sizes that do not fit a
-single 122 GB host (Q8 at 262 144-token context is loaded as TP2
-shards in ~36 s).
+single 122 GB host: Q8 at 262 144-token context loads as TP2 shards in
+~36 s (loader line, `baseline-r0.log`; that run's short-prompt decode
+samples were 41.8–48.2 tok/s at width 1).
