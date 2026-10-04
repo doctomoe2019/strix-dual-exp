@@ -72,9 +72,14 @@ This project stands on a great deal of upstream work:
   `next` branch of the upstream tree.
 - The **upstream thunderbolt-net teardown fix for CVE-2026-74691**,
   which our stream teardown-order patch deliberately mirrors.
-- **gufo** and its authors — the serving framework this transport was
-  built for (`gufo/` here is a patch against its `feat/tp2-tbstream`
-  branch, regenerable with `git diff HEAD`).
+- **gufo and its authors** — the serving framework this transport was
+  built for. In particular **Sven Neuhaus**, whose upstream TP2 work
+  this project's `feat/tp2-tbstream` branch builds on directly: the
+  rank-1-without-scheduler startup, the TP2 pair collectives error
+  propagation, and the TP control-byte refactors. The wider gufo
+  contributor community (Francesco Bozzo, Federico Izzo, pixmaate and
+  others) is part of the foundation too. `gufo/` here is a patch
+  against that branch, regenerable with `git diff HEAD`.
 - Vanilla **Linux 7.3-rc3** is the base kernel; `kernel/patches/`
   expresses our entire divergence from it.
 
