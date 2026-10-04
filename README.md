@@ -32,11 +32,11 @@ hosts, frame-oriented sessions on the NHI DMA rings, E2E flow control,
 zero-copy character-device interface — no NIC and no kernel IP stack in
 the serving path:
 
-| Transport | Round-trip latency | Bulk bandwidth |
+| Transport | Round-trip latency | Bulk bandwidth (wire ceiling 5 GB/s) |
 | --- | --- | --- |
 | tbnet — kernel IP over the same link | 67–80 µs (bare ping RTT) | 3.6–4.0 GB/s (TCP) |
 | verbs — RDMA NIC baseline | 24 µs (10 KiB exchange) | — |
-| **tbstream — this work** | **p50 22–23 µs · p99 34–42 µs** (10 KiB exchange) | 1.0–1.1 GB/s serving config · **5.0 GB/s** @ 32 MiB frames |
+| **tbstream — this work** | **p50 22–23 µs · p99 34–42 µs** (10 KiB exchange) | tuned: **≈5 GB/s, line rate** · serving config: 1.0–1.1 GB/s (software pacing for latency, not a hardware limit) |
 
 The stream matches the RDMA latency baseline with no RDMA hardware at
 all — a round-trip 10 KiB exchange over USB4v2 is faster than a bare

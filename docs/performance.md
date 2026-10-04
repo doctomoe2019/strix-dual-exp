@@ -11,12 +11,15 @@ Qualification gates, as recorded in gufo's
 
 | Metric | Value | Source / note |
 | --- | --- | --- |
-| Exchange latency, 10 KiB (decode shape) | p50 22–23 µs · p99 34–42 µs | RDMA (verbs) baseline: 24 µs |
-| One-way bandwidth, serving config | 1 MiB **1.01–1.03** · 5 MiB **1.04–1.05** · 32 MiB **1.13–1.14** GB/s | default throttling |
-| Bulk one-way, 32 MiB frames | **5.0 GB/s** | `evidence/bw-final-r0.log` |
+| Exchange latency, 10 KiB (decode shape) | p50 22–23 µs · p99 34–42 µs | this rig, 2026-10-01, `--noverify`; RDMA (verbs) baseline 24 µs |
+| One-way bandwidth, serving config | 1 MiB **1.01–1.03** · 5 MiB **1.04–1.05** · 32 MiB **1.13–1.14** GB/s | this rig, 2026-10-01, `--noverify` — default throttling (8192): a latency-first *software pacing* ceiling, not the wire limit |
+| One-way bandwidth, with verify checksums | 0.49 GB/s @ 5 MiB | `evidence/qual-rank0-18550.log`-class runs — the FNV pass costs ~0.5 GB/s receiver-side |
+| Bulk, tuned throttling, 32 MiB frames | **≈5 GB/s — line rate** (5.03 reported TX-side) | `evidence/bw-final-r0.log`; sender-side accounting, ≈ the 40 Gbit/s wire |
 
-For scale: the raw link is 40 Gbit/s dual-lane Gen4 class (5 GB/s line
-rate).
+For scale: the raw link is 40 Gbit/s dual-lane USB4 Gen3-mode
+(5 GB/s line rate per direction); tbnet's 3.6–4.0 GB/s over the same
+wire independently confirms the transport, not the link, was the
+limiter in the serving-config rows.
 
 ### tbnet head-to-head (measured 2026-10-04, same link)
 
@@ -26,7 +29,7 @@ tbnet (thunderbolt-net, kernel IP over the same XDomain link), MTU
 | Transport | Latency | Bulk bandwidth |
 | --- | --- | --- |
 | tbnet | 67–80 µs RTT (`ping -i 0.02 -c 50`) | 3.6 GB/s rx · 4.0 GB/s tx (iperf3 TCP, 4 s; 28.5 / 31.7 Gbit/s) |
-| tbstream | p50 22–23 µs (round-trip 10 KiB exchange) | 1.0–1.1 GB/s serving config · 5.0 GB/s @ 32 MiB |
+| tbstream | p50 22–23 µs (round-trip 10 KiB exchange) | tuned **≈5 GB/s (line rate)** · serving config 1.0–1.1 GB/s (software pacing) |
 
 - The stream's full 10 KiB round-trip is faster than tbnet's bare
   ICMP RTT.
