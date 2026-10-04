@@ -32,10 +32,11 @@ hosts, frame-oriented sessions on the NHI DMA rings, E2E flow control,
 zero-copy character-device interface — no NIC and no kernel IP stack in
 the serving path:
 
-| | tbnet (IP over the same link) | verbs (RDMA NIC baseline) | **tbstream (this work)** |
-| --- | ---: | ---: | ---: |
-| Round-trip latency | 67–80 µs (ping RTT) | 24 µs | **p50 22–23 µs, p99 34–42 µs** (10 KiB exchange) |
-| Bulk bandwidth | 3.6–4.0 GB/s (iperf3 TCP) | n/a | 1.0–1.1 GB/s in serving config; **5.0 GB/s** @ 32 MiB frames |
+| Transport | Round-trip latency | Bulk bandwidth |
+| --- | --- | --- |
+| tbnet — kernel IP over the same link | 67–80 µs (bare ping RTT) | 3.6–4.0 GB/s (TCP) |
+| verbs — RDMA NIC baseline | 24 µs (10 KiB exchange) | — |
+| **tbstream — this work** | **p50 22–23 µs · p99 34–42 µs** (10 KiB exchange) | 1.0–1.1 GB/s serving config · **5.0 GB/s** @ 32 MiB frames |
 
 The stream matches the RDMA latency baseline with no RDMA hardware at
 all — a round-trip 10 KiB exchange over USB4v2 is faster than a bare
@@ -46,20 +47,25 @@ and no copies. Provenance in `docs/performance.md`.
 **2. gufo serving over it** — two-rank tensor parallelism with all
 cross-rank traffic on the stream transport, Qwen3.8-Flash-Next Q4:
 
-| | Single host (benchmark corpus) | **Dual-host TP2 (recorded requests)** | Gain |
+| Throughput (tok/s) | Single host | Dual-host TP2 | Gain |
 | --- | ---: | ---: | ---: |
-| Prefill pp @ ~0 depth | 1628.5 tok/s | — | — |
-| Prefill pp @ ~61–65k depth | 1316.7 tok/s | **2104.6–2195.5 tok/s** | **+60–67 %** |
-| Decode tg, mixed @ ~61–65k | 32.6 tok/s | 62.6 tok/s (32-tok window, 77 % acceptance) | indicative only¹ |
-| Decode tg, repetitive @ ~61–65k | 46.1 tok/s | 62.6 tok/s (same request) | indicative only¹ |
-| Fits at 262 144-token context | Q4 only (87 GB) | **Q8 as TP2 shards**, loaded in ~36 s | — |
+| Prefill pp @ ~61–65k depth | 1316.7 | **2104.6 – 2195.5** | **+60 – 67 %** |
+| Decode tg @ ~61–65k, mixed corpus | 32.6 | 62.6 ¹ | ~+92 % ¹ |
+| Decode tg @ ~61–65k, repetitive corpus | 46.1 | 62.6 ¹ | ~+36 % ¹ |
 
-¹ The dual-host numbers so far come from the TP2 qualification
-harness (width-1, short decode windows, synthetic prompts), not from
-gufo's benchmark corpora with timed tg128 windows — so tg gains are
-directional, not benchmark-grade. Prefill is compute-bound and
-depth-matched, making those gains solid. **Running gufo's bench
-harness on the pair is the pending benchmark** (see Ongoing work).
+- Single-host best (depth 0) is 1628.5 pp / 59.2 tg-repetitive — the
+  long-context rows above are where TP2 pulls far ahead.
+- The pair is also a capacity unlock: **Q8 at 262 144-token context**
+  loads as TP2 shards in ~36 s and does not fit one 122 GB host at
+  all.
+
+¹ The dual-host tg numbers come from the TP2 qualification harness
+(width-1, 32-token decode windows, synthetic prompts), not gufo's
+benchmark corpora with timed tg128 windows — treat the tg gains as
+directional. Prefill is compute-bound and depth-matched, so those
+gains are solid. **Benchmark-grade dual-host runs (gufo's bench
+harness, both corpora, tg128, multi-user) are the pending
+measurement** — see Ongoing work.
 
 **3. A link that survives its own hardware.** The Barlow Ridge
 host-to-host link has a failure mode where stream teardown desyncs
