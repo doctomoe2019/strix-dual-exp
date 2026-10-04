@@ -4,7 +4,8 @@
 
 Serve a single LLM with two-rank tensor parallelism across two hosts
 that have no NIC fast enough for cross-rank traffic, but do have
-80 Gb/s-class USB4v2 host interfaces (Barlow Ridge, JHL9580) that Linux
+80 Gb/s-class USB4v2 host interfaces (Barlow Ridge, JHL9580; our
+link trains at 40 Gb/s dual-lane symmetric) that Linux
 already knows how to drive.
 
 ## Transport

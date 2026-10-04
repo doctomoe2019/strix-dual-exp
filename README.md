@@ -13,7 +13,8 @@ that made the link resilient enough to serve from.
 
 - Two identical Strix Halo mini-PCs (AMD RYZEN AI MAX+ 395 class, 122 GB
   LPDDR5X), back-to-back USB4v2 link via Barlow Ridge (Intel JHL9580)
-  80 Gb/s-class NHIs, dual-lane Gen4.
+  80 Gb/s-class NHIs; trained at 40 Gb/s dual-lane symmetric
+  (5 GB/s per direction).
 - gufo serves one model as TP2: rank 0 bootstraps as listener, rank 1
   connects; all cross-rank traffic rides the stream transport instead of
   a NIC.
