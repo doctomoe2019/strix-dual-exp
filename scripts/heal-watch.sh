@@ -10,7 +10,7 @@ PEER=10.55.0.$(( 1 - RANK + 1 ))
 LOG=$(dirname "$0")/../evidence/heal-watch.log
 echo "[$(date +%F\ %T)] heal-watch start rank=$RANK peer=$PEER" >> $LOG
 
-while sleep 5; do
+while sleep 2; do
   if ping -c1 -W1 $PEER >/dev/null 2>&1; then
     continue
   fi

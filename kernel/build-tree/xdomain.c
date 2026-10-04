@@ -1567,12 +1567,12 @@ static int tb_xdomain_bond_lanes_uuid_high(struct tb_xdomain *xd)
  * struct layout; safe because the state work is serialized per
  * XDomain.
  */
-#define TBSTREAM_XD_RETRAIN_STREAK	8
+#define TBSTREAM_XD_RETRAIN_STREAK	4
 /* Unarmed fallback: a peer that wedged during its boot settle would
  * otherwise never arm the detector (3 consecutive successes never
  * happen). ~36 consecutive failed probes ≈ 100+ s — well past any
  * normal boot settle, short enough to recover promptly. */
-#define TBSTREAM_XD_RETRAIN_STREAK_UNARMED	36
+#define TBSTREAM_XD_RETRAIN_STREAK_UNARMED	14
 
 static u64 tb_xd_streak_route;
 static unsigned int tb_xd_streak;
@@ -1962,7 +1962,7 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			 * peer into re-reading on every probe.
 			 */
 			queue_delayed_work(tb_xd_state_wq, &xd->state_work,
-					   msecs_to_jiffies(2500));
+					   msecs_to_jiffies(1000));
 		}
 		break;
 
