@@ -16,6 +16,9 @@ cd "$BIN_DIR"
 nohup ./tbstream_probe --rank 0 --port $PORT "$@" > "$R0_LOG" 2>&1 &
 R0_PID=$!
 sleep 1
-timeout 300 ssh $HOST_B "cd $BIN_DIR && timeout 240 ./tbstream_probe \
+# 30 s remote cap: probe traffic completes in seconds; anything longer
+# is a wedged or truncated stream (dmesg/ping accounting in ablate.sh
+# classifies the cycle).
+timeout 60 ssh $HOST_B "cd $BIN_DIR && timeout 30 ./tbstream_probe \
   --rank 1 --peer ${TBNET_BASE}.1 --port $PORT $* > $R1_LOG 2>&1; echo R1-RC=\$?"
 wait $R0_PID; echo "R0-RC=$?"

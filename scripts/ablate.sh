@@ -3,6 +3,8 @@
 # wedge accounting on both hosts, autonomous-heal waits between cycles.
 # Arms (env ARMS, comma-separated; default A,B0,B1):
 #   A  tbstream_probe bw, gates volume (6.7 GB/cycle) — premise test
+#   A2 tbstream_probe bw + --pairing teardown (gufo-style control-socket
+#      lifecycle: held through the run, closed right before the stream fds)
 #   B0 gufo qualification cycle, defaults (= TX pacing 25 us/MiB on)
 #   B1 gufo qualification cycle, GUFO_TBSTREAM_TX_PACING_US=0
 # env ROUNDS: cycles per arm (default 4).
@@ -27,12 +29,86 @@ run_arm() { # $1=arm $2=cycle-tag
       bash "$DIR/probe-pair-tb.sh" "A-$2" -- \
         --mode bw --bytes 1048576,5242880,33554432 --frames 200 --noverify \
         2>&1 | grep -E "RC=" ;;
+    A2)
+      bash "$DIR/probe-pair-tb.sh" "A2-$2" -- \
+        --mode bw --bytes 1048576,5242880,33554432 --frames 200 --noverify \
+        --pairing teardown \
+        2>&1 | grep -E "RC=" ;;
+    A3)
+      bash "$DIR/probe-pair-tb.sh" "A3-$2" -- \
+        --mode fulldup --bytes 1048576,5242880,33554432 --frames 200 \
+        --noverify --pairing teardown \
+        2>&1 | grep -E "RC=" ;;
+    A4)
+      bash "$DIR/probe-pair-tb.sh" "A4-$2" -- \
+        --mode fulldup --bytes 1048576,5242880,33554432 --frames 200 \
+        --noverify --pairing teardown --idle-seconds 40 \
+        2>&1 | grep -E "RC=" ;;
+    A5)
+      bash "$DIR/probe-pair-tb.sh" "A5-$2" -- \
+        --mode bw --bytes 1048576,5242880,33554432 --frames 200 --noverify \
+        --exit-open \
+        2>&1 | grep -E "RC=" ;;
+    A6)
+      bash "$DIR/probe-pair-tb.sh" "A6-$2" -- \
+        --mode fulldup --bytes 1048576,5242880,33554432 --frames 200 \
+        --noverify --pairing teardown --exit-open \
+        2>&1 | grep -E "RC=" ;;
+    A7)
+      bash "$DIR/probe-pair-tb.sh" "A7-$2" -- \
+        --mode bw --bytes 20544,51264,81984 --frames 470 --noverify \
+        2>&1 | grep -E "RC=" ;;
+    A8)
+      bash "$DIR/probe-pair-tb.sh" "A8-$2" -- \
+        --mode bw --bytes 20544,51264,81984 --frames 470 --noverify \
+        --batch-bytes 1048576 \
+        2>&1 | grep -E "RC=" ;;
+    A7V10)
+      bash "$DIR/probe-pair-tb.sh" "A7V10-$2" -- \
+        --mode bw --bytes 20544,51264,81984 --frames 4700 --noverify \
+        2>&1 | grep -E "RC=" ;;
+    A12)
+      bash "$DIR/probe-pair-tb.sh" "A12-$2" -- \
+        --mode bw --bytes 20416,49088,81856 --frames 470 --noverify \
+        2>&1 | grep -E "RC=" ;;
+    A13)
+      bash "$DIR/probe-pair-tb.sh" "A13-$2" -- \
+        --mode bw --bytes 20544,51264,81984 --frames 470 --noverify \
+        --reader-glutton \
+        2>&1 | grep -E "RC=" ;;
+    A14)
+      bash "$DIR/probe-pair-tb.sh" "A14-$2" -- \
+        --mode bw --bytes 1048576 --frames 400 --noverify \
+        --reader-glutton \
+        2>&1 | grep -E "RC=" ;;
+    A15)
+      bash "$DIR/probe-pair-tb.sh" "A15-$2" -- \
+        --mode bw --bytes 5242880,33554432 --frames 120 --noverify \
+        2>&1 | grep -E "RC=" ;;
+    A16)
+      bash "$DIR/probe-pair-tb.sh" "A16-$2" -- \
+        --mode bw --bytes 20544,51264,81984 --frames 470 --noverify \
+        --reader-buffered --pairing teardown \
+        2>&1 | grep -E "RC=" ;;
+    A17)
+      bash "$DIR/probe-pair-tb.sh" "A17-$2" -- \
+        --mode bw --bytes 20544,51264,81984 --frames 470 --noverify \
+        --reader-buffered --batch-bytes 1048576 --pairing teardown \
+        2>&1 | grep -E "RC=" ;;
     B0)
       bash "$DIR/probe-pair.sh" "B0-$2" --model $MODEL \
         --context 4096 --max-tokens 16 2>&1 | grep -E "R1-RC=|ping=" ;;
     B1)
       GUFO_ENV="GUFO_TBSTREAM_TX_PACING_US=0" \
         bash "$DIR/probe-pair.sh" "B1-$2" --model $MODEL \
+        --context 4096 --max-tokens 16 2>&1 | grep -E "R1-RC=|ping=" ;;
+    B2)
+      GUFO_ENV="GUFO_TBSTREAM_CPU_STAGE=1" \
+        bash "$DIR/probe-pair.sh" "B2-$2" --model $MODEL \
+        --context 4096 --max-tokens 16 2>&1 | grep -E "R1-RC=|ping=" ;;
+    B3)
+      GUFO_ENV="GUFO_TBSTREAM_COALESCE=1" \
+        bash "$DIR/probe-pair.sh" "B3-$2" --model $MODEL \
         --context 4096 --max-tokens 16 2>&1 | grep -E "R1-RC=|ping=" ;;
     *) echo "unknown arm $1" >&2; return 9 ;;
   esac
