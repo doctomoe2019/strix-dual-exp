@@ -25,6 +25,36 @@ that made the link resilient enough to serve from.
 - Model used throughout development/qualification: Qwen3.8-Flash-Next
   UD Q4_K_XL via gufo's TP2 batched probe harness.
 
+## What we have achieved so far
+
+- **A low-latency, high-bandwidth stream transport over USB4v2** between
+  two hosts: frame-oriented sessions on the NHI DMA rings with E2E flow
+  control, zero-copy character-device interface, and per-session HopID
+  rotation — no NIC involved at any point.
+- **gufo serving over it**: two-rank tensor parallelism with all
+  cross-rank traffic on the stream transport. For Qwen3.8-Flash-Next in
+  Q4 quantization this reaches **up to ~2100 tok/s prefill (pp)** and
+  **up to ~75 tok/s generation (tg)** on the pair.
+- **A link that survives its own hardware.** The Barlow Ridge
+  host-to-host link has a failure mode where stream teardown desyncs
+  one host's NHI control plane until reboot (correlated with individual
+  cable ends; see `docs/wedge-investigation.md`). It is now fully
+  self-healing: detection, forced link disconnect/retrain, re-
+  enumeration and re-configuration happen autonomously in ~8 s, with
+  serving continuing through the event.
+
+## Ongoing work
+
+- **Avoid wedges in the first place**: the trigger is cable-end
+  correlated and rate independent — a passive (non-retimed) certified
+  cable is the leading candidate for a wedge-free physical layer.
+- **Keep hardening the self-heal**: the settle-window recovery path is
+  design-fixed but not yet observed end-to-end in the wild; the
+  control-channel stall race quarantined behind the XDomain workqueue
+  is worth root-fixing (see `docs/upstream/`).
+- **Continue the optimization program** to fully exhaust whatever
+  performance is still gainable in the transport and serving path.
+
 ## What is in here
 
 - `kernel/` — the out-of-tree `drivers/thunderbolt` build tree (core +
@@ -72,14 +102,12 @@ This project stands on a great deal of upstream work:
   `next` branch of the upstream tree.
 - The **upstream thunderbolt-net teardown fix for CVE-2026-74691**,
   which our stream teardown-order patch deliberately mirrors.
-- **gufo and its authors** — the serving framework this transport was
-  built for. In particular **Sven Neuhaus**, whose upstream TP2 work
-  this project's `feat/tp2-tbstream` branch builds on directly: the
+- **gufo, and Sven Neuhaus in particular** — the serving framework this
+  transport was built for. This project's `feat/tp2-tbstream` branch
+  builds directly on his upstream TP2 work: the
   rank-1-without-scheduler startup, the TP2 pair collectives error
-  propagation, and the TP control-byte refactors. The wider gufo
-  contributor community (Francesco Bozzo, Federico Izzo, pixmaate and
-  others) is part of the foundation too. `gufo/` here is a patch
-  against that branch, regenerable with `git diff HEAD`.
+  propagation, and the TP control-byte refactors. `gufo/` here is a
+  patch against that branch, regenerable with `git diff HEAD`.
 - Vanilla **Linux 7.3-rc3** is the base kernel; `kernel/patches/`
   expresses our entire divergence from it.
 
