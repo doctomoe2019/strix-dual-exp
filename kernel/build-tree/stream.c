@@ -76,6 +76,23 @@
 #define TBSTREAM_DEV_MAX_RING_SIZE	4096
 #define TBSTREAM_DEV_THROTTLING		8192
 #define TBSTREAM_DEV_MAX_THROTTLING	16776960
+/*
+ * TX coalescing: writes smaller than one ring depth (256 slots of
+ * TB_MAX_FRAME_SIZE) are staged in the driver and pushed to the ring
+ * in bulk. Sustained small write()/read() syscall pairs at high rate
+ * wedge the USB4 router retimers on the path (config space stops
+ * answering; hop deactivation then fails) while the same bytes moved
+ * in ring-depth-sized syscalls never do. A read() or poll() on the
+ * stream flushes the stage — for lockstep peers that is exactly the
+ * "this side is now waiting on the peer" moment, so staged frames are
+ * never held past a wait. Disable with tb_stream.tx_coalesce=0.
+ */
+#define TBSTREAM_DEV_TX_STAGE_BYTES	(256 * TB_MAX_FRAME_SIZE)
+
+static bool tx_coalesce = false;
+module_param(tx_coalesce, bool, 0644);
+MODULE_PARM_DESC(tx_coalesce,
+		 "stage sub-ring-depth writes until the peer waits (default N; experimental: does not prevent retimer wedges for lockstep traffic)");
 
 /**
  * enum tbstream_frame_pdf - PDF numbers for tunneled frames
@@ -158,6 +175,9 @@ struct tbstream_dev {
 	struct mutex lock;
 	struct tbstream_ring tx_ring;
 	struct tbstream_ring rx_ring;
+	/* TX coalescing stage (tbstream_dev_flush_stage) */
+	void *tx_stage;
+	size_t tx_stage_len;
 	struct list_head list;
 };
 
@@ -301,6 +321,7 @@ static void tbstream_dev_release(struct kref *kref)
 	}
 	ida_free(&tbstream_indices, sdev->index);
 	kfree(sdev->misc.name);
+	kvfree(sdev->tx_stage);
 	kfree(sdev);
 }
 
@@ -536,6 +557,42 @@ tbstream_dev_send_data(struct tbstream_dev *sdev, struct iov_iter *from,
 	if (IS_ERR(sf))
 		return PTR_ERR(sf);
 	return tb_ring_tx(sdev->tx_ring.ring, &sf->frame);
+}
+
+/*
+ * Pushes as much of the TX stage to the ring as fits. Ring must have
+ * space; the remainder stays staged, keeping the byte-stream order.
+ * Called with sdev->lock held.
+ */
+static void tbstream_dev_flush_stage(struct tbstream_dev *sdev)
+{
+	size_t sent = 0;
+	int ret = 0;
+
+	while (sdev->tx_stage_len - sent > 0 && !ret) {
+		struct iov_iter iter;
+		struct kvec kv;
+		size_t size;
+
+		if (!tbstream_ring_available(&sdev->tx_ring))
+			break;
+
+		size = min_t(size_t, sdev->tx_stage_len - sent,
+			     TB_MAX_FRAME_SIZE);
+		kv.iov_base = sdev->tx_stage + sent;
+		kv.iov_len = size;
+		iov_iter_kvec(&iter, ITER_SOURCE, &kv, 1, size);
+		ret = tbstream_dev_send_data(sdev, &iter, size);
+		if (ret == -ENOBUFS)
+			ret = 0;
+		else if (!ret)
+			sent += size;
+	}
+	if (sent) {
+		memmove(sdev->tx_stage, sdev->tx_stage + sent,
+			sdev->tx_stage_len - sent);
+		sdev->tx_stage_len -= sent;
+	}
 }
 
 static void
@@ -799,6 +856,17 @@ tbstream_dev_fops_read_iter(struct kiocb *kiocb, struct iov_iter *to)
 		if (tbstream_ring_available(&sdev->rx_ring))
 			break;
 
+		/*
+		 * Peer-wait hint: the receive side is empty, so this
+		 * reader is about to park waiting for peer data — the
+		 * moment nothing staged for the peer may be held back.
+		 * (Only here: a drain-style reader that keeps finding
+		 * data would otherwise flush the stage on every read
+		 * and the coalescing would never engage.)
+		 */
+		if (tx_coalesce && sdev->tx_stage_len)
+			tbstream_dev_flush_stage(sdev);
+
 		mutex_unlock(&sdev->lock);
 
 		if (nowait)
@@ -907,9 +975,46 @@ tbstream_dev_fops_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 			return -ENXIO;
 		}
 
+		if (tx_coalesce && sdev->tx_stage_len) {
+			/* Staged bytes go first: keep the byte-stream order. */
+			tbstream_dev_flush_stage(sdev);
+			if (sdev->tx_stage_len)
+				goto wait_for_ring;
+		}
+
+		if (tx_coalesce &&
+		    iov_iter_count(from) < TBSTREAM_DEV_TX_STAGE_BYTES) {
+			size_t count = iov_iter_count(from);
+			/*
+			 * Small write: accept into the stage without
+			 * waiting for ring space. The stage is empty here
+			 * (flushed above when needed) and the write is
+			 * smaller than the stage, so it always fits.
+			 */
+			if (!sdev->tx_stage) {
+				sdev->tx_stage = kvmalloc(
+					TBSTREAM_DEV_TX_STAGE_BYTES, GFP_KERNEL);
+				if (!sdev->tx_stage) {
+					mutex_unlock(&sdev->lock);
+					return -ENOMEM;
+				}
+			}
+			/* copy_from_iter() consumes the iterator: compare
+			 * against the count captured before the copy. */
+			nbytes = copy_from_iter(sdev->tx_stage, count, from);
+			if (nbytes != count) {
+				mutex_unlock(&sdev->lock);
+				return -EFAULT;
+			}
+			sdev->tx_stage_len = nbytes;
+			mutex_unlock(&sdev->lock);
+			return nbytes;
+		}
+
 		if (tbstream_ring_available(&sdev->tx_ring))
 			break;
 
+wait_for_ring:
 		mutex_unlock(&sdev->lock);
 
 		if (nowait)
@@ -974,6 +1079,8 @@ tbstream_dev_fops_poll(struct file *file, struct poll_table_struct *wait)
 
 	poll_wait(file, &sdev->wait, wait);
 	guard(mutex)(&sdev->lock);
+	if (tx_coalesce && sdev->tx_stage_len)
+		tbstream_dev_flush_stage(sdev);
 	if (tbstream_dev_valid(sdev) != 0) {
 		mask |= EPOLLHUP | EPOLLERR;
 	} else {
@@ -1051,6 +1158,27 @@ static int tbstream_dev_fops_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&sdev->lock);
 	if (--sdev->users == 0) {
+		/*
+		 * Release anything still staged before the CLOSE so the
+		 * peer receives the tail (write(2) success must mean
+		 * delivery once the stream closes). The ring drains from
+		 * softirq context, so give it time between attempts.
+		 */
+		if (tx_coalesce && sdev->tx_stage_len) {
+			int attempts = 200; /* ~200 ms cap */
+
+			while (sdev->tx_stage_len && attempts--) {
+				tbstream_dev_flush_stage(sdev);
+				if (!sdev->tx_stage_len)
+					break;
+				mutex_unlock(&sdev->lock);
+				msleep(1);
+				mutex_lock(&sdev->lock);
+			}
+			/* Userspace closed with the tail undeliverable:
+			 * drop it, matching the ring's own semantics. */
+			sdev->tx_stage_len = 0;
+		}
 		/*
 		 * Send CLOSE tunneled packet to notify the other end
 		 * that we are closing the file. We do this twice if the
@@ -1245,8 +1373,12 @@ static int tbstream_dev_alloc_in_hopid(struct tbstream_dev *sdev, int hopid)
 	struct tb_xdomain *xd = tbstream_dev_xdomain(sdev);
 	int ret;
 
-	if (sdev->in_hopid > 0 && sdev->in_hopid != hopid)
+	if (sdev->in_hopid > 0 && sdev->in_hopid != hopid) {
 		tb_xdomain_release_in_hopid(xd, sdev->in_hopid);
+		/* Zero before allocating so a failure cannot leave the
+		 * just-released ID dangling in sdev->in_hopid. */
+		sdev->in_hopid = 0;
+	}
 	if (!hopid) {
 		sdev->in_hopid = hopid;
 		return 0;
@@ -1271,8 +1403,12 @@ static int tbstream_dev_alloc_out_hopid(struct tbstream_dev *sdev, int hopid)
 	struct tb_xdomain *xd = tbstream_dev_xdomain(sdev);
 	int ret;
 
-	if (sdev->out_hopid > 0 && sdev->out_hopid != hopid)
+	if (sdev->out_hopid > 0 && sdev->out_hopid != hopid) {
 		tb_xdomain_release_out_hopid(xd, sdev->out_hopid);
+		/* Zero before allocating so a failure cannot leave the
+		 * just-released ID dangling in sdev->out_hopid. */
+		sdev->out_hopid = 0;
+	}
 	if (!hopid) {
 		sdev->out_hopid = hopid;
 		return 0;
@@ -1492,10 +1628,20 @@ tbstream_dev_attach_stream(struct tbstream_dev *sdev, struct tbstream_group *sg)
 		if (sdev->in_hopid <= 0 && sdev->out_hopid <= 0)
 			service_get_hopids(stream->svc, name, &sdev->in_hopid,
 					   &sdev->out_hopid);
-		if (sdev->in_hopid)
-			tbstream_dev_alloc_in_hopid(sdev, sdev->in_hopid);
-		if (sdev->out_hopid)
-			tbstream_dev_alloc_out_hopid(sdev, sdev->out_hopid);
+		/*
+		 * service_get_hopids() stores the negotiated IDs before
+		 * they are allocated: clear them again when the allocation
+		 * fails, or a later detach would free IDs that were never
+		 * allocated (corrupting the ida).
+		 */
+		if (sdev->in_hopid) {
+			if (tbstream_dev_alloc_in_hopid(sdev, sdev->in_hopid))
+				sdev->in_hopid = 0;
+		}
+		if (sdev->out_hopid) {
+			if (tbstream_dev_alloc_out_hopid(sdev, sdev->out_hopid))
+				sdev->out_hopid = 0;
+		}
 	}
 
 	service_update_properties(stream->svc, name, sdev->in_hopid,
@@ -1506,7 +1652,8 @@ tbstream_dev_attach_stream(struct tbstream_dev *sdev, struct tbstream_group *sg)
 	wake_up_interruptible(&sdev->wait);
 }
 
-static void tbstream_dev_detach_stream(struct tbstream_dev *sdev)
+static void tbstream_dev_detach_stream(struct tbstream_dev *sdev,
+					bool keep_hopids)
 {
 	const char *name = config_item_name(&sdev->group.cg_item);
 	struct tbstream *stream;
@@ -1518,10 +1665,31 @@ static void tbstream_dev_detach_stream(struct tbstream_dev *sdev)
 			return;
 		sdev->stream = NULL;
 		xd = tb_service_parent(stream->svc);
-		if (sdev->out_hopid > 0)
+		/*
+		 * Zero after releasing: a re-attach must not resurrect a
+		 * stale HopID against a (possibly new) xdomain, or the
+		 * next release double-frees / frees a foreign ID and
+		 * corrupts the ida (seen as "ida_free called for id=N
+		 * which is not allocated" after a link flap during
+		 * settle, leaving enable_paths failing with -ENOMEM).
+		 *
+		 * When the removal originates from xdomain teardown
+		 * (tbstream_remove) the idas die with the xd: releasing
+		 * here would race the xd's own cleanup and free IDs it
+		 * already released, so keep them instead.
+		 */
+		if (!keep_hopids && sdev->out_hopid > 0) {
 			tb_xdomain_release_out_hopid(xd, sdev->out_hopid);
-		if (sdev->in_hopid > 0)
+			sdev->out_hopid = 0;
+		} else if (keep_hopids) {
+			sdev->out_hopid = 0;
+		}
+		if (!keep_hopids && sdev->in_hopid > 0) {
 			tb_xdomain_release_in_hopid(xd, sdev->in_hopid);
+			sdev->in_hopid = 0;
+		} else if (keep_hopids) {
+			sdev->in_hopid = 0;
+		}
 	}
 
 	service_update_properties(stream->svc, name, 0, 0);
@@ -1585,7 +1753,7 @@ tbstream_dev_make_group(struct config_group *group, const char *name)
 
 	ret = misc_register(&sdev->misc);
 	if (ret) {
-		tbstream_dev_detach_stream(sdev);
+		tbstream_dev_detach_stream(sdev, false);
 		scoped_guard(mutex, &sg->lock)
 			list_del(&sdev->list);
 		/* Calls tbstream_dev_put() */
@@ -1725,7 +1893,8 @@ static void tbstream_group_attach_stream(struct tbstream *stream)
 	config_group_put(&sg->group);
 }
 
-static void tbstream_group_detach_stream(struct tbstream *stream)
+static void tbstream_group_detach_stream(struct tbstream *stream,
+					 bool keep_hopids)
 {
 	struct tbstream_group *sg;
 	struct tbstream_dev *sdev;
@@ -1739,7 +1908,7 @@ static void tbstream_group_detach_stream(struct tbstream *stream)
 		/* Detach this stream from the stream devices */
 		list_for_each_entry_reverse(sdev, &sg->dev_list, list) {
 			tbstream_dev_get(sdev);
-			tbstream_dev_detach_stream(sdev);
+			tbstream_dev_detach_stream(sdev, keep_hopids);
 			tbstream_dev_put(sdev);
 		}
 		tbstream_put(sg->stream);
@@ -1774,7 +1943,12 @@ static void tbstream_remove(struct tb_service *svc)
 {
 	struct tbstream *stream = tb_service_get_drvdata(svc);
 
-	tbstream_group_detach_stream(stream);
+	/*
+	 * The xdomain is going away: its HopID idas are destroyed with
+	 * it, so the devices must not release (the xd's own cleanup
+	 * owns them — releasing here races it and corrupts the ida).
+	 */
+	tbstream_group_detach_stream(stream, true);
 	scoped_guard(mutex, &tbstream_lock)
 		list_del(&stream->list);
 	tbstream_put(stream);
