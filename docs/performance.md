@@ -67,15 +67,9 @@ multi-user batching) for benchmark-grade decode numbers.
 
 ## Context: single-host reference (same model, same gufo)
 
-From gufo's `BENCHMARKS.md` (single Strix host, no TP2):
-
-| Metric | Single host | Dual-host TP2 (this project) |
-| --- | ---: | ---: |
-| Prefill pp (depth 0) | 1628.5 tok/s | up to 2195.5 tok/s (+35 %) |
-| Prefill pp (depth 131 072) | 1335.9 tok/s | 2104.6 tok/s @ 61 k (+58 %) |
-| Decode tg, single user | 25.9 (AR) / 59.2 (MTP repetitive) | 63.3 (MTP) |
-
-The dual-host pair also unlocks context/quant sizes that do not fit a
+Single-host figures throughout this file are from gufo's
+`BENCHMARKS.md` (single Strix host, no TP2, benchmark corpora with
+timed tg128 windows). The dual-host pair also unlocks context/quant sizes that do not fit a
 single 122 GB host: Q8 at 262 144-token context loads as TP2 shards in
 ~36 s (loader line, `baseline-r0.log`; that run's short-prompt decode
 samples were 41.8–48.2 tok/s at width 1).
