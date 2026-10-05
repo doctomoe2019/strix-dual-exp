@@ -144,6 +144,33 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 22:00 P1+C2 SHIPPED (gufo @ 1f5ddd2: 6c8dd0a launch plan /
+  3b85080 LDS-staged combine + docs; serve d02fddc4 deployed both hosts,
+  smoke OK). P1: the TP2 2560x3072 attn_out/ssm_out GEMMs reuse the
+  one-host 2560x6144 five-row-tile launch order — bit-exact, +0.4/+0.9/+0.7%
+  @32k (3/3), 8k even. C2: HcCombinePeerVec4Kernel stages local+peer rows
+  in 20KB LDS (same bytes, every reduction unchanged) — bit-exact (operator
+  exact 37/2048), +1.8/+1.6/+0.7/+0.3% @32k over the P1 twin (4/4 clean
+  pairs, median +1.15%), 8k even, kernel mean 1713.5->1643.7us (-4%,
+  controls <=1.4%); the honest mechanism is smaller than the traffic
+  thesis (re-reads not all DRAM-bound). Steady-state ref @32k now ~2265.
+  OPS ISSUES hit while deploying the smoke: (1) gufo serve now REQUIRES
+  --tp-control-token; (2) my pgrep pattern "[n]ewbin/gufo" never matched
+  "./gufo serve" cmdlines -> I misread a HEALTHY serving pair as dead and
+  killed it — always pgrep "[.]/gufo serve" or by PID; (3) a duplicate
+  serve launch OOM'd (kernel oom-kill + hipMalloc fail + 10s page-alloc
+  stalls that made ssh/tool calls hang — check for an existing serve before
+  launching); (4) NEW OPEN BUG: rank1 exited ~1min idle after two correct
+  requests with "TP control peer closed the channel" (rank0 alive, no
+  errors its side; control = tbnet 10.55.0.1:18516) — investigate before
+  long-idle production; (5) benign known WARN at every gufo exit on
+  hostB: ring_interrupt_active "interrupt for RX ring 10 already
+  disabled" during tbstream_dev_stop (upstream-report material). Pair left
+  healthy: streams attached, no wedge signatures. Probe inventory: probe-m1
+  (=fb0dc77 reference), probe-p1 (+P1), probe-c2 (=current tree, +C2),
+  plus the H1/C1 variants. NEXT by ranking: G1 (GDN 4-block row-split for
+  TP2's 48-block geometry), R1 (routed experts w/ captured routing), S1
+  cost model.
 - 2026-10-05 21:00 H1 REJECTED + C1 CLOSED (gufo @ 3954b59 docs-only; code
   back to fb0dc77 state; serve binary c4d3dce unchanged/current):
   H1 (fixed-geometry hidden=2560 Vec4 combine specialization, both plain

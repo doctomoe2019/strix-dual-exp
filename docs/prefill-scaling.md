@@ -181,25 +181,41 @@ Excess decomposition (per rank, at 32 k):
 
 1. **[Stage 1, DONE: retained, +0.9 % steady-state median — see above.]**
 2. **[Stage 1b, DONE: retained, +2.1 % on paired MTP prefill — see above.]**
-3. **Combine-kernel efficiency — the cheap route is DEAD (H1, rejected
-   2026-10-05).** Constant-folding the index math (a fixed-geometry
-   hidden=2560 specialization, ISA showed 41 % integer/select instructions)
-   kept every output bit but moved the kernel only −1.4 % per call
-   (1 690 vs 1 714 µs, matched slow-mode profiles; expert-GEMM controls
-   ±1–2 %) and end-to-end stayed within noise. The combine is
-   latency/bandwidth-bound; the ~800 ms/rank headroom at 32 k would need a
-   different mechanism (e.g. a different residual layout or store width),
-   not instruction diet.
-4. **Chunk-width re-sweep (C1, 2026-10-05, closed): 2 048 retained.**
+3. **[TP2 launch plan (P1), DONE 2026-10-05: retained, +0.7 % median @32 k
+   (3/3 pairs), 8 k even — the rank's 2 560×3 072 output projections take
+   the one-host 6 144 shape's five-row-tile launch order; bit-exact.]**
+4. **[LDS-staged combine rows (C2), DONE 2026-10-05: retained, +1.15 %
+   median @32 k over the P1 twin (4/4 clean pairs), 8 k even; bit-exact;
+   peer-combine kernel mean −4 % (1 713.5 → 1 643.7 µs). The remaining
+   combine headroom is real but smaller than the traffic estimate — the
+   repeated reads were not all DRAM-bound.]**
+5. **Combine-kernel efficiency — instruction diet is DEAD (H1, rejected
+   2026-10-05).** Constant-folding the index math kept every bit but moved
+   the kernel only −1.4 % per call; the data-reuse route (C2) captured the
+   available gain. Further combine work needs a residual-layout or
+   store-width redesign.
+6. **Chunk-width re-sweep (C1, 2026-10-05, closed): 2 048 retained.**
    1 536-token lanes −3.7/−5.0 % @32 k; 3 072-token lanes +1.3/+0.9/+1.4 %
    @32 k (24 % fewer layer exchanges) but −2.1 % @8 k (ragged tail).
    Mixed-sign at ~1 %.
-5. **Split the replicated dense/W8A8/mix family** (hyperconnection and
+7. **GDN row-split parallelism (G1, next): the TP2 geometry launches 2 row
+   blocks × 24 value heads = 48 blocks/rank vs the single host's 96 — a
+   4-block × 24 variant would restore occupancy (state rows are
+   independent; row/bit-exact). ~0.86 s family.**
+8. **Routed experts (R1): ~3.8 s/rank with TP2's 320-wide geometry;
+   benchmark with captured routing distributions, then one mechanism
+   (short-K down staging, grid order, or bucket width). Helps single and
+   dual.**
+9. **Split the replicated dense/W8A8/mix family** (hyperconnection and
    indexer projections): up to ~1.2 s/rank more. Larger blast radius;
-   evaluate with the cost model first — the HC mixing has a low-rank
+   evaluate with the cost model first (S1) — the HC mixing has a low-rank
    factorization, which caps what any exchange-based split can save.
-6. Kernel-level prefill speedups help single and dual equally; they are the
-   only route to 3 k tok/s on this partition.
+10. Kernel-level prefill speedups help single and dual equally; they are the
+    only route to 3 k tok/s on this partition.
+
+Steady-state reference @32 k after today's retentions: ≈ 2 265 tok/s
+non-MTP (was 2 235). Cumulative retained since the triage: ≈ +2.6 % over
+the Stage-1b build.
 
 Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),
