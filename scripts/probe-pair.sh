@@ -22,7 +22,7 @@ nohup env ${GUFO_ENV:-} ./qwen38_flash_next_tp_batched_probe \
   "$@" > "$R0_LOG" 2>&1 &
 R0_PID=$!
 sleep 2
-ssh $HOST_B "cd $BIN_DIR && ${R1_ENV_PREFIX}timeout 240 ./qwen38_flash_next_tp_batched_probe \
+ssh $HOST_B "cd $BIN_DIR && ${R1_ENV_PREFIX}timeout 240 stdbuf -oL -eL ./qwen38_flash_next_tp_batched_probe \
   --tp-rank 1 --tp-bootstrap-host 10.55.0.1 --tp-transport tbstream \
   --tp-tbstream-dev /dev/tbstream0 $* > $R1_REMOTE 2>&1; echo R1-RC=\$?"
 timeout 15 scp -q $HOST_B:"$R1_REMOTE" "$R1_LOG" 2>/dev/null || echo "(r1 log fetch failed)"

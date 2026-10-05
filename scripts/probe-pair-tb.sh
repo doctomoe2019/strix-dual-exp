@@ -24,7 +24,7 @@ R0_PID=$!
 sleep 1
 # 30 s remote cap: probe traffic completes in seconds; anything longer
 # is a wedged or truncated stream (ablate.sh classifies the cycle).
-timeout 60 ssh $HOST_B "cd $BIN_DIR && timeout 30 ./tbstream_probe \
+timeout 60 ssh $HOST_B "cd $BIN_DIR && timeout 30 stdbuf -oL -eL ./tbstream_probe \
   --rank 1 --peer ${TBNET_BASE}.1 --port $PORT $* > $R1_REMOTE 2>&1; echo R1-RC=\$?"
 timeout 15 scp -q $HOST_B:"$R1_REMOTE" "$R1_LOG" 2>/dev/null || echo "(r1 log fetch failed)"
 wait $R0_PID; echo "R0-RC=$?"
