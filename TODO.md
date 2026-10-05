@@ -144,6 +144,24 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 16:10 PREFILL SCALING TRIAGE COMPLETE (docs/prefill-scaling.md,
+  evidence/prefill-triage/): dual prefill is GPU-COMPUTE-bound, not
+  link-bound (97.6% GPU busy at 32k; WaitValue 0.07%; exchanges fully
+  hidden). Each rank burns 72% of a single host's GPU time per token; the
+  30.7% excess splits into: combine-family lost fusion 35% (TP2 disables the
+  fused MoE-epilogue-into-combine, executor.cpp:1892), TP2-only kernels
+  (AddRows 631ms + MoeEpilogue 546ms @32k) 26%, un-halved replicated dense/
+  W8A8/mix families 26%, expert/GDN split inefficiency 13%. Matched-curve
+  tooling: new single-host prefill_probe on feat/tp2-tbstream (same synthetic
+  walk + Session::Sync as tp_batched_probe). Speedups: 0.91x @2k (pair LOSES
+  below one chunk), 1.43x @8k, 1.31-1.41x @32k, 1.32-1.36x @61k. MTP catch-up
+  neutral on dual (serve 1880-2117 non-MTP vs 2030 MTP @62k); single-host
+  MTP prefill FASTER at 8k/32k (+9.5/+3.3%, unexplained depth interaction).
+  Variance ±6%/session -> interleave future A/B rounds. Next lever (est.
+  2.3-2.4k tok/s): exchange halved-F16 down_e instead of F32 MoE output to
+  restore fused combine; then splitting the replicated HC/indexer dense
+  family (~2.6k ceiling). 3k needs single-host kernel work. rocprofv3 DBs in
+  /tmp/opencode/prof-{dual,single}/ (copy before reboot).
 - 2026-10-05 12:15 PERFORMANCE BASELINE (baseline-B kernel + rebased
   gufo b7ee0a9, GPUs forced high both hosts, evidence/perf-baseline/):
   | Metric | Today | Historical | Verdict |

@@ -146,6 +146,12 @@ where stream teardown desyncs one host's NHI control plane until reboot
 
 ## Ongoing work
 
+- **Prefill scaling** (see [docs/prefill-scaling.md](docs/prefill-scaling.md)):
+  the dual-host 2.0–2.2 k tok/s ceiling is triaged — GPU compute that TP2
+  does not halve (lost MoE-epilogue fusion, exchange-boundary overhead
+  kernels, replicated hyperconnection/indexer projections), not the USB4
+  link, which sits 97 %+ hidden behind compute. Ranked fixes and their
+  estimated ceilings are in the doc.
 - **Wedge residuals**: the primary trigger (teardown while the peer is
   mid-stream) is fixed by baseline-B; what remains is to quantify any
   cable-end-correlated residue with controlled cable-identification
