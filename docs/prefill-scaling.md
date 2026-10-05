@@ -70,23 +70,67 @@ sustained), 98.5 % of copy time concurrent with compute** — a ~1–2 %
 fabric-contention tax on the kernels, real but small. The working diagnosis
 (Replicated GPU work + extra memory passes, link exonerated) stands.
 
-## Stage 1 result: fused peer-add combine (retained)
+## Stage 1 result: fused peer-add combine (retained, effect small)
 
 `SplitReduce.finish` (add-the-peer) became `acquire` (return the peer
 pointer); the paired lane's combine folds the sum in registers
 (`HcCombinePeerVec4Kernel`, bit-exact by construction: same two-operand FP32
 sum and reduction order; f16/q8 wire and uncovered geometries fall back to
-the plain add; the MoE observer gets the summed row written back).
+the plain add).
 
 - Operator check: bit-exact vs the unfused sequence at 37 and 2 048 tokens
   (residual, F16/float norm, tiled Q8, summed row).
 - End-to-end: both-rank logit hashes and member checksums **identical to the
-  baseline binary** (17019078310904286155 / 13217550055185120708 @32 k).
-- Interleaved 4×4 pair A/B @32 k: candidate 2 190–2 221 tok/s vs baseline
-  1 941–2 174 — wins all 8 paired comparisons, median **+1.9 %**, and the
-  per-run spread collapses (σ ≈ 7 vs ≈ 108). The removed AddRows pass was
-  largely MALL-cache resident (20 MiB buffer vs 32 MiB cache), so the
-  traffic saving is modest; the variance reduction is the more visible win.
+  baseline binary**.
+- Kernel time at 32 k: the `AddRowsBroadcast` family (631 ms) disappears;
+  the fused kernel runs 2 605 ms against the unfused pair's 2 826 ms
+  (~220 ms/rank, profile pass 93 of the 9addbac+fix build).
+
+**Corrected measurement (2026-10-05 evening).** The first A/B ("wins 8/8,
+median +1.9 %") miscounted four paired comparisons as eight, and both arms
+measured each process's *first* prefill: an A/A control with identical
+binaries swung 2 088–2 210 tok/s (±5 %). The probe now runs an untimed
+warmup prefill first (A/A ±0.7 %; steady-state paired prefill ≈ 2 235 tok/s
+at 32 k), after which a balanced A/B against a no-fusion twin build measures
+a **median +0.9 %**. Retained for the exact fused path and the removed pass,
+not as a throughput claim. A residual "slow mode" remains: roughly one run
+in five lands ~6 % slow on BOTH ranks from the warmup onward (whole-session
+memory placement, not first-touch); the warmup doubles as a canary —
+discard-and-retry pairs whose warmup exceeds ~2.3 s.
+
+**Alias hazard found and fixed (same session).** With a MoE observer armed,
+`ForwardPair` passed the block buffer as both the fused kernel's local input
+and its summed-row output; every stream re-reads the local row, so an
+in-place sum added the peer again. Production was unaffected (no observer),
+but the diagnostic path corrupted every MoE hash and a member checksum
+(reproduced on the 9addbac binary; fixed build = baseline hashes again). The
+host wrappers now refuse `block_summed == block_local`, which routes the
+observer path through the separate add.
+
+## Stage 1b result: K/V-only draft catch-up in paired prefill (retained, +2 %)
+
+`ForwardPair`'s known-hidden catch-up forwards now take the `kv_only` path
+the unpaired prefill already uses; the next full forward rebuilds the
+predictor residual from the kept trunk rows.
+
+- Gates: paired `tp_probe --split` (1 261-token prompt, MTP) whole-vs-split
+  logits bit-identical on both ranks; member tokens/checksums across the
+  change equal each other AND the greedy AR decode (rank agreement exact);
+  the chunk seam covered with a 4 104-token prompt.
+- Perf (canary-gated interleaved pairs, MTP): 8 k +3.0/+1.2 %, 32 k
+  +1.5/+2.9 % — **median +2.1 %**, 4/4 pairs favor the change.
+
+## Measurement protocol (from Stage 1's correction onward)
+
+- The paired probe runs an untimed warmup prefill before its timed loop; a
+  120 ms pause after the warmup opens a clean profile boundary.
+- Canary: discard and retry any pair whose warmup exceeds ~2.3 s (slow mode:
+  ~1 in 5 sessions runs ~6 % slow on both ranks from allocation onward).
+- A/B arms differ by exactly the change under test (twin worktree builds);
+  interleave and reverse order; report paired medians, never means across
+  slow-mode-contaminated sessions.
+- Steady-state references @32 k (canary-clean): non-MTP ≈ 2 235 tok/s,
+  MTP ≈ 2 180 (post Stage 1b).
 
 ## Where the un-halved GPU time goes (rocprofv3, 32 768 tokens)
 

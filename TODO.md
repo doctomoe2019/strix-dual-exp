@@ -144,6 +144,32 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 19:30 STAGE 1 CORRECTED + ALIAS FIX + STAGE 1b SHIPPED (gufo @
+  fb0dc77: d118e85 alias guard, c9293ea kv-only paired catch-up, fb0dc77
+  probe warmup/MTP; evidence/prefill-triage/ab-stage1b/): (1) Stage-1's
+  "wins 8/8, median +1.9%" MIS-COUNTED (4 pairs) and both arms measured the
+  process's FIRST prefill — an A/A with identical binaries swung ±5%, so the
+  gain was noise. Probe now warmups first (A/A ±0.7%); steady-state Stage-1
+  effect vs a no-fusion twin: median +0.9% (kernel-level: AddRows 631ms
+  gone, fused 2605 vs 2826ms pair). Residual SLOW MODE ~1-in-5 sessions
+  (-6% BOTH ranks, whole session incl warmup => memory placement, not
+  first-touch); warmup doubles as canary (retry pairs >2.3s). Steady-state
+  refs @32k: non-MTP ~2235 tok/s, MTP ~2180. (2) ALIAS BUG in Stage-1 found
+  by audit + reproduced: moe_observer path passed block_out as BOTH local
+  input and summed output of HcCombinePeerVec4Kernel; every stream re-reads
+  the row => peer added twice; corrupted ALL MoE hashes + member checksum on
+  the diagnostic path (production unaffected, no observer). Fix: wrappers
+  refuse block_summed==block_local (observer takes the separate add); fixed
+  binary's --moe-input-hashes stream + checksums IDENTICAL to pre-Stage-1
+  baseline, ranks agree. (3) STAGE 1b RETAINED: ForwardPair catch-up now
+  kv_only (unpaired prefill's path; next full forward rebuilds residual).
+  Gates: paired tp_probe --split MTP logits bit-identical both ranks; member
+  tokens == pre-change binary == greedy AR decode; 4104-token seam covered.
+  Perf (canary-gated pairs): +3.0/+1.2% @8k, +1.5/+2.9% @32k, median +2.1%,
+  4/4 pairs. Probe also gained --mtp-model (paired MTP harness: DecodeStep
+  greedy, rank agreement via logit hashes). Serve nix rebuild in flight.
+  NEXT: H1 combine specialization (2605ms family, #1 at 17.4%; ISA first),
+  then C1 chunk/lane sweep (now measurable at ±0.7%), P1 shape table.
 - 2026-10-05 17:20 STAGE 1 SHIPPED (fused peer-add combine, gufo @ 9addbac,
   evidence/prefill-triage/ab-stage1/): SplitReduce.finish->acquire; paired
   lane's combine folds the peer partial in registers (HcCombinePeerVec4Kernel,
