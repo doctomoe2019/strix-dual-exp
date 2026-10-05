@@ -1,0 +1,150 @@
+# TODO — wedge resolution plan (FINALIZED 2026-10-05; adaptive)
+
+Status: EXECUTING. Healing stays IN every live build; after the one
+authorized baseline reboot the kernel is FROZEN and recovery takes
+precedence over experiments.
+
+Hypothesis under test (replaces "cable-only"):
+
+> Certain traffic/scheduling patterns expose ring-progress or flow-control
+> defects in the stream/NHI stack. Timeouts, premature teardown, reattach
+> and recovery churn can escalate those into persistent control-plane
+> failures. Cable/port/firmware may modulate susceptibility but are not
+> established as the sole cause.
+
+Withdrawn/qualified conclusions (do not build on these):
+- `timeout reading config space 0 from 0x12/0x16` = LOCAL hop-table
+  entries 9/11 (offset 2*hop_index), NOT in-cable retimer routes.
+- "both sides >=1 MiB syscalls" is NOT established (A17 also added a
+  teardown pairing barrier; A7 lacked it; big read requests can return
+  tiny results — strace-b3.log shows 2 MiB asks returning 64/12288/90240).
+- The kernel TX "coalescer" does not accumulate writes (flushes previous
+  stage per write) — its negative result proves nothing. Keep disabled.
+- "8 s heal" is harness-quantized (5 s + 3 s), not a latency measurement.
+- Old scoring called userspace-failed runs "clean" (RC 134/139 counted
+  clean when dmesg counters didn't move).
+
+## Ground rules (every stage)
+
+- NEVER rmmod this stack on the live pair; no PCI rebind; no live kprobes
+  on module text. Kernel replacement = reboot (hostB first, then hostA).
+- RECOVERY FIRST: after the baseline reboot, a failed trial ends after
+  diagnostic capture; the runner yields to the healer; resume only after
+  stable connectivity + fresh stream qualification. If recovery has not
+  completed within 120 s of the first failure, STOP the campaign and
+  report. No automatic reboot/escalation. A healed failed trial stays a
+  recorded failure.
+- Record per block: boot ids + uptime, LOADED module srcversions on BOTH
+  hosts (/sys/module/.../srcversion), tx_coalesce/busy_poll readback,
+  gufo binary sha, trained rate/lanes.
+- Scoring: 4 classes, never conflated: (1) workload success (both ranks
+  RC=0, full delivery, integrity ok), (2) transport failure (stall /
+  ENXIO / deadline / truncation / nonzero RC), (3) link episode (new
+  timeout/deactivation lines + health interruption), (4) recovery span
+  (first-failure -> restored, measured from dmesg timestamps).
+- Unique run dirs per block; preserve BOTH ranks' logs; copy rank-1 logs
+  back. Settle gap after any wedge (heal + quiet dmesg) before next cycle.
+- External timeout = workload failure, not automatically "wedge".
+- 0/N clean is screening only (0/3 => ~63% upper bound). Validation
+  blocks need a positive control and larger N.
+
+## Stage 0 — harness + reference measurements on CURRENT kernel (no reboot)
+
+- [x] 0.1 Finalize this plan; record in repo.
+- [ ] 0.2 ablate.sh: 4-class scoring, unique timestamped run dirs, rank-1
+      log retrieval, identity header per run (loaded srcversions, gufo
+      sha, boot ids), settle gaps, post-cycle dmesg snapshots for heal-span
+      measurement.
+- [ ] 0.3 Add arm A18 = A7 + --pairing teardown (delivery-confirmed close)
+      -> isolates the completion barrier (A18 vs A7) and batching/reader
+      (A18 vs A17).
+- [ ] 0.4 Reference block on the CURRENT kernel, same gufo binary:
+      ARMS=A7,A17,A18 (+B0 gufo cycle) x 3 rounds, interleaved. This is
+      the corrected "before" data and removes the biggest confound.
+
+## Stage 1 — ONE kernel candidate + ONE reboot cycle (authorized)
+
+- [ ] 1.1 Build candidate in a SEPARATE tree (kernel/candidate-b/), from:
+      - pristine 7.3-rc3 base
+      - stream.c: westeri/thunderbolt next-branch version wholesale
+        (busy-poll lock fix, RX polling, CLOSE write-side handling,
+        framing-error -> -EIO; upstream stop/release ordering replaces
+        our teardown reorder; NO coalescer)
+      - re-apply our stream.c essentials onto it: hop rotation clamp +
+        ida fix (detach zeroing, keep_hopids from tbstream_remove,
+        attach alloc-failure clearing) — as separate upstream-reportable
+        hunks
+      - nhi.c: stock + tb_ring_poll_pending() + descriptor-write-in-poll
+        (4d84caebab18) — no struct/ABI changes, thunderbolt-net untouched
+      - xdomain.c/tb.c: our current healing versions unchanged
+        (keepalive, lane-disable retrain, rescan, quarantine wq)
+      - heal-watch + tbstream-heal@ units unchanged
+- [ ] 1.2 Compile-verify the whole module set; keep known-good artifacts.
+- [ ] 1.3 Deploy + reboot ONCE: hostB first, verify over LAN ssh, then
+      hostA. Verify RUNNING srcversions, healers active, stream opens,
+      tbnet up. If anything is unreliable: STOP, no further reboots.
+- [ ] 1.4 Re-run the Stage-0 reference block (same gufo binary) on the
+      new baseline. DECISION GATE:
+      - clean where before failed -> kernel freeze, validation block,
+        then Stage 5 planning (hardware, next access window).
+      - still failing -> kernel freeze anyway, continue Stage 2/3
+        (userspace) on this baseline.
+
+## Stage 2 — confound removal + userspace fixes (kernel FROZEN, no reboots)
+
+- [ ] 2.1 Small-message 2x2: {direct, batched} writes x {ordinary,
+      buffered} reads, identical pairing barrier in every cell; log actual
+      syscall request/return distributions.
+- [ ] 2.2 gufo transport fixes, one at a time, requalified each:
+      busy-poll poll() fallback, EOF/stop handling in reader,
+      StopReader lifetime vs buffer free, buffered-reader grow preserving
+      unread bytes.
+- [ ] 2.3 Rate vs shape at matched volume (controlled producer rates).
+- [ ] 2.4 Optional: bidirectional progress loop / bounded app buffering
+      (design per donnerkeule lessons; only if 2.1-2.2 don't resolve).
+
+## Stage 3 — gufo rebase (separate from kernel comparison)
+
+- [ ] 3.1 Rebase feat/tp2-tbstream onto pinned neuhaus feat/tp2-rdma
+      (2833856; rdma branch adds integration extras — cherry-pick only
+      what's needed). Keep: ESRCH fix, rank-1 retry window, transport
+      fixes from 2.2.
+- [ ] 3.2 Build via `nix build .#tp2-tbstream`, deploy both hosts,
+      requalify correctness + performance on the frozen kernel.
+
+## Stage 4 — deferred until next physical access window
+
+- [ ] Descriptor/doorbell batching (tb_ring_tx_more/notify port).
+- [ ] Kernel-owned RX backlog / admission bounds (donnerkeule model).
+- [ ] Keepalive notification-suppression bug fix (xdomain.c:1951) —
+      prepared as a patch, loaded only with the next kernel window.
+- [ ] tbnet-disable isolation arm (healer uses tbnet reachability — needs
+      a redesigned health signal first).
+- [ ] Cable identification/orientation blocks; verified-passive cable;
+      cross-controller (AMD-native vs Barlow) at matched Gen3.
+- [ ] Upstream report: ida corruption vanilla bug, accepted-TX-tail loss,
+      close-after-small-frame repro + upstream-fix deltas, ctl cancel-path
+      hang, rescan gap.
+
+## Stage 5 — closeout
+
+- [ ] gufo-prod re-enable criteria: N clean serve restarts + wedge
+      transparency on the final build; bench-grade numbers after.
+- [ ] Commit/PR decision with neuhaus (credits: Linux thunderbolt/
+      Noever/Westerberg/Borzeszkowski; gufo/Sven Neuhaus; donnerkeule
+      write-striping findings as design reference).
+
+## Do not regress
+
+- Healing chain in every live build (post-baseline: kernel frozen).
+- Hop rotation + ida fix; E2E mandatory (dropping deadlocks); reboot
+  order hostB-first; iommu=pt cmdline; FLAKE build = `.#tp2-tbstream`;
+  freeze gufo binary during kernel A/B; never change kernel and gufo in
+  the same comparison.
+
+## Log
+
+- 2026-10-05 (session start): plan finalized per user: healing stays in;
+  ONE reboot authorized for the kernel baseline; after that kernel frozen
+  and recovery takes precedence (120 s recovery deadline, no auto-reboot,
+  user away for hours). Execution begins at Stage 0.
