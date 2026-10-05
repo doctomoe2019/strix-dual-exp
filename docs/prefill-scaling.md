@@ -198,25 +198,39 @@ Excess decomposition (per rank, at 32 k):
    1 536-token lanes −3.7/−5.0 % @32 k; 3 072-token lanes +1.3/+0.9/+1.4 %
    @32 k (24 % fewer layer exchanges) but −2.1 % @8 k (ragged tail).
    Mixed-sign at ~1 %.
-7. **GDN row-split parallelism (G1, next): the TP2 geometry launches 2 row
-   blocks × 24 value heads = 48 blocks/rank vs the single host's 96 — a
-   4-block × 24 variant would restore occupancy (state rows are
-   independent; row/bit-exact). ~0.86 s family.**
-8. **Routed experts (R1): ~3.8 s/rank with TP2's 320-wide geometry;
-   benchmark with captured routing distributions, then one mechanism
-   (short-K down staging, grid order, or bucket width). Helps single and
-   dual.**
-9. **Split the replicated dense/W8A8/mix family** (hyperconnection and
-   indexer projections): up to ~1.2 s/rank more. Larger blast radius;
-   evaluate with the cost model first (S1) — the HC mixing has a low-rank
-   factorization, which caps what any exchange-based split can save.
+7. **[GDN row-split parallelism (G1), DONE 2026-10-05: retained.]** The TP2
+   geometry's 48-block grid (2 row blocks × 24 value heads vs the single
+   host's 96) under-filled the device; the kernel is now block-size
+   templated and the rank's geometry dispatches 128-thread/32-row blocks
+   (96 blocks, per-row lanes and DPP reduction unchanged → bit-exact).
+   Kernel mean 1 466.6 → 1 294.5 µs (**−11.7 %**, controls ≤0.2 %);
+   e2e @32 k **median +0.40 % (5/6 clean pairs)**, 8 k even.
+8. **[Routed experts (R1), CLOSED 2026-10-05.]** R1a (skip provably dead
+   epilogue tiles, bit-exact by construction) made the kernels *slower*
+   (+6–9 %/call, e2e −2.45 %) — replacing the constant unrolled trip count
+   with the runtime `live_tok_tiles` bound perturbed the live path more
+   than the dead tiles cost. With the earlier 256-row-block and
+   expert-ordered rejections, three scheduling/tiling interventions have
+   now failed on this family: it is weight-streaming-bound (0.54 of single
+   vs 0.50 ideal — only ~360 ms of excess). R1b (K=320 down
+   specialization) deprioritized: no mechanism that changes stage count
+   addresses streaming. Revisit only with a weight-layout/streaming idea,
+   which would help single-host too.
+9. **Split the replicated dense/W8A8/mix family** — see the S1 ledger
+   (docs/s1-sharding-ledger.md): the one positive-model candidate is the
+   **N-split of the fused HC mixer down** (~260 ms/rank ceiling, +1.8 %
+   e2e, bit-exact, +1.4 GB wire hidden by the existing overlap); splits
+   after the 320-wide low-rank bottleneck are bandwidth-dead, and the
+   router/indexer family needs a shape-capture pass first.
 10. Kernel-level prefill speedups help single and dual equally; they are the
     only route to 3 k tok/s on this partition.
 
-Steady-state reference @32 k after today's retentions: ≈ 2 265 tok/s
-non-MTP (was 2 235). Cumulative retained since the triage: ≈ +2.6 % over
+Steady-state reference @32 k after G1: ≈ 2 285 tok/s non-MTP (clean-mode
+sessions 2 262–2 291). Cumulative retained since the triage: ≈ +3 % over
 the Stage-1b build.
 
 Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),
-instruction-level combine tuning (H1 rejected).
+instruction-level combine tuning (H1 rejected), routed epilogue/tiling
+work (R1a + three prior rejections — the family is streaming-bound),
+GDN geometry (G1 captured the available block-parallelism).

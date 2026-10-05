@@ -144,6 +144,37 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 23:30 G1 RETAINED + R1 CLOSED (gufo @ f61f17a: 40a7e82 GDN
+  finer row-split + docs; serve 31127d4c deployed+smoked both hosts).
+  G1: block-size-templated GdnRowSplitKernel; TP2's 24-value-head geometry
+  dispatches 128-thread/32-row blocks (96 vs 48 blocks; lanes/DPP per row
+  unchanged -> bit-exact, checksums canonical every session; gdn_ops_test
+  gained the 8k/24v-head geometry). Kernel mean 1466.6->1294.5us (-11.7%,
+  matched profiles, routed/attention/combine controls <=0.2%); e2e @32k
+  +0.19/+1.04/+0.60/-0.47/+0.03/+0.99 (5/6, median +0.40%); 8k even
+  (clean pairs -0.9%/-0.3%, final matched pair 2305.3 vs 2305.2 — early
+  spread was drift). R1a REJECTED: bounding the paired/wide epilogue loops
+  by live_tok_tiles (dropping only write-guarded dead tiles) SLOWED the
+  routed kernels +6-9%/call and -2.45% e2e — the runtime bound perturbed
+  the unrolled live path; epilogue tails are not the family's bound (3rd
+  scheduling/tiling rejection; it is weight-streaming-bound, ~360ms excess
+  vs ideal). R1b deprioritized (see prefill-scaling item 8). S1 LEDGER
+  written (docs/s1-sharding-ledger.md): the one positive candidate is the
+  N-split of the fused HC mixer down (~260ms/rank, +1.8% ceiling,
+  bit-exact, +1.4GB wire under existing overlap); post-bottleneck splits
+  bandwidth-dead; router/indexer needs a shape-capture pass. SERVE SMOKE
+  (62k MTP): prefill 1983.8 tok/s (in the 1880-2117 band), decode 71.5
+  @100% acceptance, 0 errors; IDLE CHECK PASSED (2.5min idle then request
+  -> 200) — and this RETRACTS yesterday's "rank1 idle control-channel
+  drop" bug: the archived serve-r0.log shows event=shutdown_requested
+  signal=15 at exactly 21:22:59, i.e. my own kill -TERM propagated; no
+  spontaneous idle failure exists. Slow-mode canary fired ~40% of tonight's
+  sessions (warmup 2750-3085ms) — discard/retry discipline held; GPU idle
+  38C, no wedge signatures after 20+ probe sessions + 1 serve cycle.
+  Probe inventory: probe-c2 (1f5ddd2 ref), probe-g1 (=current tree 40a7e82),
+  probe-r1a (rejected variant). Evidence: evidence/prefill-triage/g1-r1a/
+  (incl. prof-g1/prof-r1a DBs). NEXT: S1 mixer-down N-split per ledger,
+  then router/indexer shape capture.
 - 2026-10-05 22:00 P1+C2 SHIPPED (gufo @ 1f5ddd2: 6c8dd0a launch plan /
   3b85080 LDS-staged combine + docs; serve d02fddc4 deployed both hosts,
   smoke OK). P1: the TP2 2560x3072 attn_out/ssm_out GEMMs reuse the

@@ -1,0 +1,76 @@
+# S1 cost-model ledger: sharding the replicated prefill family
+
+Written 2026-10-05 after G1 (rocprofv3 window = one clean 32 k main-prompt
+pass, `evidence/prefill-triage/g1-r1a/prof-g1/`). All figures per rank.
+The question: which of the un-halved "replicated" families can actually pay
+for an exchange, at what byte cost, and with what numerical contract.
+
+## Inventory (32 k window, per rank, post-G1 build)
+
+| Family | Kernel | ms | Notes |
+| --- | --- | ---: | --- |
+| Fused HC mixer down | W8A8BlockedWmma<64,128,4,2,4,true> | 657 | 320×10240, 1 504 calls |
+| HC mix epilogue | HcMixEpilogueF16Kernel | 387 | elementwise + narrow/q8 emits |
+| Router/indexer dense | DenseF16GEMM<256,128,1,4,2,8,true> | 838 | 1 504 calls, shapes not yet captured |
+| Small dense | DenseF16GEMM<64,64,2,2,4,1> | 266 | 1 344 calls |
+| Select score/mark | — | 154 | triage figure |
+
+Replicated total ≈ 2.3 s of the ~14.4 s pass. Reference exchange traffic
+today: 32.25 GB/pass at 2.11 GB/s staging, 98.5 % overlapped, GPU waits
+10.6 ms — the overlap machinery has headroom for more wire, not for more
+serial waits.
+
+## Candidate 1 — N-split the fused HC mixer down (RECOMMENDED, next batch)
+
+Each rank computes 160 of the 320 low-rank rows; the 320-row `lo` is
+all-gathered before the up projection consumes it.
+
+- **Saving:** the launch is `dim3(ceil(tokens/128), 5)` over 64-row tiles;
+  160 rows/rank rounds to 3 tiles of the 5 → ~40 % of 657 ms ≈ **260 ms
+  (+1.8 % e2e ceiling)**.
+- **Wire:** 2 048×160×4 B = 1.25 MB per mixer call; ×2 mixers ×36 layers
+  ×16 chunks ≈ **1.4 GB/pass, +4.4 %** over today's 32 GB — inside the
+  two-lanes-a-layer-apart overlap design.
+- **Numerics:** N-split is per-column bit-exact; the gathered `lo` is
+  byte-identical to today's, and the fused up/epilogue path is untouched.
+- **Complexity:** `HcMix` needs the pair exchange at the `lo` boundary (a
+  new wait per mixer call); staging copies +1.4 GB (copy-engine, overlapped
+  historically).
+- **Gate:** the canonical checksum set must be unchanged (bit-exact).
+
+## Candidate 2 — N-split the HC up / anything after the low-rank bottleneck
+
+The up writes the full 10 240-wide mixed activation that both ranks'
+replicated residual stream consumes; an all-gather there moves
+2 048×10 240×2 B ≈ 40 MB per call ≈ 46 GB/pass. **Dead on bandwidth** —
+this is the concrete form of "the HC low-rank factorization caps
+exchange-based splits": exchange AT the 320-wide bottleneck (candidate 1),
+never after it.
+
+## Candidate 3 — router/indexer dense family (needs shape capture first)
+
+838 + 266 ms is the second-biggest replicated block, but the per-operator
+shapes are not yet attributed (the 16×40/64×64 grids cover several
+projections). Router-shaped outputs are small but must be gathered before
+a replicated top-k; modeled wire is O(GB/pass) for ~550 ms of saving —
+marginal. **Action: capture the per-op shape inventory** (observer hook or
+one profile pass with launcher instrumentation) before deciding.
+
+## Ruled out
+
+- Elementwise/epilogue splits (387 ms): no arithmetic to halve, pure
+  bandwidth already replicated by design.
+- Select/score (154 ms): <0.2 % ceiling.
+- K-splits of any projection: change the reduction contract for no byte
+  saving over N-splits.
+
+## Bottom line
+
+One implementable candidate with a positive modeled net (mixer-down
+N-split, ~+1.8 % ceiling, bit-exact, +4.4 % wire). Everything else in the
+replicated family is either bandwidth-dead or needs the shape-capture pass
+first. Combined with the routed family's demonstrated scheduling
+sensitivity (R1a: a 6–9 % per-call regression from a loop-bound change),
+the honest post-G1 map is: GDN done, routed experts need a
+weight-streaming mechanism (not tiling), and the mixer-down split is the
+next structural win.
