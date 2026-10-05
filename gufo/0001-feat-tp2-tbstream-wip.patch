@@ -284,7 +284,7 @@ index f8ceb0a..19c60c7 100644
        );
  
 diff --git a/src/cli/serve/serve.cpp b/src/cli/serve/serve.cpp
-index effbce6..7f403b1 100644
+index effbce6..4657e91 100644
 --- a/src/cli/serve/serve.cpp
 +++ b/src/cli/serve/serve.cpp
 @@ -45,6 +45,9 @@
@@ -357,11 +357,39 @@ index effbce6..7f403b1 100644
      if (tp_world_size == 2 &&
          (tp_control_token.empty() || tp_control_token.size() > 4096)) {
        std::cerr << "Error: TP2 requires --tp-control-token\n";
-@@ -1355,22 +1383,46 @@ int RunServe(std::span<const char* const> args) {
+@@ -1355,38 +1383,137 @@ int RunServe(std::span<const char* const> args) {
        (void)::sigaction(SIGINT, &stop, nullptr);
      }
      if (tp_world_size == 2) {
--#ifdef GUFO_ENABLE_TP2_RDMA
++#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
++      // Rank 1 connects to rank 0 and can lose the race with the peer's
++      // startup, or with a link that is mid-heal (the kernel self-heal
++      // re-establishes the stream within ~10 s). Retry the connection
++      // side for a bounded window before giving up; rank 0 only listens
++      // and never needs this.
++      const auto attempt = [&]() -> bool {
++        std::string tp_error;
++        if (tp_transport == "tbstream") {
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++          const models::qwen38_flash_next::rocm::TbstreamConfig
++              tbstream_config{
++                  .rank = tp_rank,
++                  .world_size = tp_world_size,
++                  .bootstrap_host = tp_bootstrap_host,
++                  .bootstrap_port = static_cast<std::uint16_t>(
++                      tp_bootstrap_port),
++                  .device_index = tp_device,
++                  .device_path = tp_tbstream_device,
++              };
++          tp_communicator =
++              models::qwen38_flash_next::rocm::CreateTbstreamCommunicator(
++                  tbstream_config, &tp_error);
++#else
++          std::cerr << "Error: this build has no TP2 tbstream support\n";
++          std::exit(2);
++#endif
++        } else {
+ #ifdef GUFO_ENABLE_TP2_RDMA
 -      const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
 -          .rank = tp_rank,
 -          .world_size = tp_world_size,
@@ -369,57 +397,125 @@ index effbce6..7f403b1 100644
 -          .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
 -          .device_index = tp_device,
 -          .gid_index = tp_gid_index,
--      };
-+#if defined(GUFO_ENABLE_TP2_RDMA) || defined(GUFO_ENABLE_TP2_TBSTREAM)
-       std::string tp_error;
++          const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
++              .rank = tp_rank,
++              .world_size = tp_world_size,
++              .bootstrap_host = tp_bootstrap_host,
++              .bootstrap_port =
++                  static_cast<std::uint16_t>(tp_bootstrap_port),
++              .device_index = tp_device,
++              .gid_index = tp_gid_index,
++          };
++          tp_communicator =
++              models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
++                  rdma_config, &tp_error);
++#else
++          std::cerr << "Error: this build has no TP2 RDMA support\n";
++          std::exit(2);
++#endif
++        }
++        if (!tp_communicator) {
++          std::cerr << "TP2 " << tp_transport
++                    << " communicator not ready: " << tp_error << "\n";
++          return false;
++        }
++        tp_control = server::TpControlChannel::Connect(
++            tp_bootstrap_host,
++            static_cast<std::uint16_t>(tp_control_port), &tp_error);
++        if (!tp_control) {
++          tp_communicator.reset();
++          std::cerr << "TP2 worker control channel not ready: " << tp_error
++                    << "\n";
++          return false;
++        }
++        return true;
+       };
+-      std::string tp_error;
 -      tp_communicator =
 -          models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
 -              rdma_config, &tp_error);
-+      if (tp_transport == "tbstream") {
-+#ifdef GUFO_ENABLE_TP2_TBSTREAM
-+        const models::qwen38_flash_next::rocm::TbstreamConfig tbstream_config{
-+            .rank = tp_rank,
-+            .world_size = tp_world_size,
-+            .bootstrap_host = tp_bootstrap_host,
-+            .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
-+            .device_index = tp_device,
-+            .device_path = tp_tbstream_device,
-+        };
-+        tp_communicator =
-+            models::qwen38_flash_next::rocm::CreateTbstreamCommunicator(
-+                tbstream_config, &tp_error);
-+#else
-+        std::cerr << "Error: this build has no TP2 tbstream support\n";
-+        return 2;
-+#endif
-+      } else {
-+#ifdef GUFO_ENABLE_TP2_RDMA
-+        const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
-+            .rank = tp_rank,
-+            .world_size = tp_world_size,
-+            .bootstrap_host = tp_bootstrap_host,
-+            .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
-+            .device_index = tp_device,
-+            .gid_index = tp_gid_index,
-+        };
-+        tp_communicator =
-+            models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
-+                rdma_config, &tp_error);
-+#else
-+        std::cerr << "Error: this build has no TP2 RDMA support\n";
-+        return 2;
-+#endif
-+      }
-       if (!tp_communicator) {
+-      if (!tp_communicator) {
 -        std::cerr << "Error creating TP2 RDMA communicator: " << tp_error
 -                  << '\n';
-+        std::cerr << "Error creating the TP2 " << tp_transport
-+                  << " communicator: " << tp_error << '\n';
-         return 1;
-       }
-       tp_control =
-@@ -1386,7 +1438,7 @@ int RunServe(std::span<const char* const> args) {
-         return 1;
+-        return 1;
+-      }
+-      tp_control =
+-          tp_rank == 0
+-              ? server::TpControlChannel::Listen(
+-                    static_cast<std::uint16_t>(tp_control_port), &tp_error)
+-              : server::TpControlChannel::Connect(
+-                    tp_bootstrap_host,
+-                    static_cast<std::uint16_t>(tp_control_port), &tp_error);
+-      if (!tp_control) {
+-        std::cerr << "Error creating TP2 worker control channel: " << tp_error
+-                  << '\n';
+-        return 1;
++      if (tp_rank == 1) {
++        const auto tp_retry_deadline =
++            std::chrono::steady_clock::now() + std::chrono::seconds(25);
++        for (;;) {
++          if (attempt()) {
++            break;
++          }
++          if (std::chrono::steady_clock::now() >= tp_retry_deadline) {
++            std::cerr << "Error creating the TP2 " << tp_transport
++                      << " connection: peer did not become ready in 25 s\n";
++            return 1;
++          }
++          std::this_thread::sleep_for(std::chrono::seconds(2));
++        }
++      } else {
++        std::string tp_error;
++        if (tp_transport == "tbstream") {
++#ifdef GUFO_ENABLE_TP2_TBSTREAM
++          const models::qwen38_flash_next::rocm::TbstreamConfig
++              tbstream_config{
++                  .rank = tp_rank,
++                  .world_size = tp_world_size,
++                  .bootstrap_host = tp_bootstrap_host,
++                  .bootstrap_port = static_cast<std::uint16_t>(
++                      tp_bootstrap_port),
++                  .device_index = tp_device,
++                  .device_path = tp_tbstream_device,
++              };
++          tp_communicator =
++              models::qwen38_flash_next::rocm::CreateTbstreamCommunicator(
++                  tbstream_config, &tp_error);
++#else
++          std::cerr << "Error: this build has no TP2 tbstream support\n";
++          return 2;
++#endif
++        } else {
++#ifdef GUFO_ENABLE_TP2_RDMA
++          const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
++              .rank = tp_rank,
++              .world_size = tp_world_size,
++              .bootstrap_host = tp_bootstrap_host,
++              .bootstrap_port =
++                  static_cast<std::uint16_t>(tp_bootstrap_port),
++              .device_index = tp_device,
++              .gid_index = tp_gid_index,
++          };
++          tp_communicator =
++              models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
++                  rdma_config, &tp_error);
++#else
++          std::cerr << "Error: this build has no TP2 RDMA support\n";
++          return 2;
++#endif
++        }
++        if (!tp_communicator) {
++          std::cerr << "Error creating the TP2 " << tp_transport
++                    << " communicator: " << tp_error << '\n';
++          return 1;
++        }
++        tp_control = server::TpControlChannel::Listen(
++            static_cast<std::uint16_t>(tp_control_port), &tp_error);
++        if (!tp_control) {
++          std::cerr << "Error creating TP2 worker control channel: "
++                    << tp_error << '\n';
++          return 1;
++        }
        }
  #else
 -      std::cerr << "Error: this build has no TP2 RDMA support\n";
@@ -427,7 +523,7 @@ index effbce6..7f403b1 100644
        return 2;
  #endif
      }
-@@ -1498,9 +1550,13 @@ int RunServe(std::span<const char* const> args) {
+@@ -1498,9 +1625,13 @@ int RunServe(std::span<const char* const> args) {
      return 1;
    }
    // Rank 0 of a TP2 pair whose peer or link is gone fails every request, so
@@ -443,7 +539,7 @@ index effbce6..7f403b1 100644
    std::atomic<bool> serving{true};
    std::thread pair_watch;
    if (tp_rank_zero) {
-@@ -1512,10 +1568,15 @@ int RunServe(std::span<const char* const> args) {
+@@ -1512,10 +1643,15 @@ int RunServe(std::span<const char* const> args) {
            continue;
          }
          server::Logger::Error(
@@ -894,10 +990,10 @@ index 077933d..86ce5c4 100644
  void WaitValue(const std::uint64_t* flag, std::uint64_t value,
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
 new file mode 100644
-index 0000000..c973c08
+index 0000000..675bdab
 --- /dev/null
 +++ b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
-@@ -0,0 +1,1591 @@
+@@ -0,0 +1,1678 @@
 +#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
 +
 +#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -949,6 +1045,9 @@ index 0000000..c973c08
 +// starts with the writer's header; the partial follows at kDataOffset.
 +constexpr std::size_t kWindowBytes = 32U << 20;
 +constexpr std::size_t kWindows = 3;
++// Ring-depth-sized syscall granularity for the coalesced transport shape
++// (256 ring slots x 4 KiB). See GUFO_TBSTREAM_COALESCE.
++constexpr std::size_t kCoalesceBytes = 1U << 20;
 +constexpr std::size_t kBufferBytes = kWindows * kWindowBytes;
 +constexpr std::size_t kDataOffset = 64;
 +// Overlapped exchanges started and not yet finished; each has its own
@@ -1325,22 +1424,14 @@ index 0000000..c973c08
 +        return false;
 +      }
 +    }
-+    // Optional TX pacing: GUFO_TBSTREAM_TX_PACING_US pauses that many
-+    // microseconds per MiB inside a large frame write. Sustained
-+    // back-to-back large lock-step exchanges (prefill sweeps at 20-80 MiB)
-+    // leave both NHIs straining at teardown: hop deactivation then times out
-+    // reading the config space and the next tunnel activation fails until a
-+    // stream teardown cycle (or reboot). A small per-MiB breath lets the
-+    // peer's RX repost path keep up. 0 disables; ~25 works (costs ~9% of
-+    // peak write bandwidth on 20 MiB frames).
-+    if (const char* pacing_env =
-+            ::getenv("GUFO_TBSTREAM_TX_PACING_US")) {
-+      char* end = nullptr;
-+      const long parsed = ::strtol(pacing_env, &end, 10);
-+      if (end != pacing_env && parsed >= 0 &&
-+          parsed <= std::numeric_limits<long>::max() / 2) {
-+        tx_pacing_us_ = static_cast<std::uint32_t>(parsed);
-+      }
++    // Wedge mitigation: GUFO_TBSTREAM_COALESCE=1 switches the reader to
++    // ring-depth-sized read() requests, parsing frames from a flat
++    // buffer. Sustained small write()/read() syscall pairs at high rate
++    // wedge the Barlow Ridge retimers; the write side is coalesced in
++    // the driver (tb_stream.tx_coalesce), this covers the read side.
++    // See strix-dual-exp docs/wedge-investigation.md.
++    if (const char* coal_env = ::getenv("GUFO_TBSTREAM_COALESCE")) {
++      coalesce_ = *coal_env == '1';
 +    }
 +    fd_ = ::open(config_.device_path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
 +    if (fd_ < 0) {
@@ -1444,10 +1535,12 @@ index 0000000..c973c08
 +      return false;
 +    }
 +    try {
-+      reader_ = std::thread([this] {
-+        PinToCpuFromTop(1);
-+        Read();
-+      });
++      const int rc = ::pthread_create(&reader_tid_, nullptr, ReadTrampoline,
++                                      this);
++      if (rc != 0) {
++        throw std::system_error(rc, std::generic_category());
++      }
++      reader_tid_valid_ = true;
 +      reader_started_ = true;
 +    } catch (const std::system_error&) {
 +      SetError(error, "tbstream reader thread creation failed");
@@ -1861,7 +1954,6 @@ index 0000000..c973c08
 +    const auto spin_deadline =
 +        std::chrono::steady_clock::now() + kExchangeSpinWindow;
 +    std::size_t written = 0;
-+    std::size_t pacing_mark = 0;
 +    while (written < frame_bytes) {
 +      if (stopping_.load(std::memory_order_relaxed)) {
 +        SetError(error, "tbstream communicator stopped");
@@ -1871,16 +1963,6 @@ index 0000000..c973c08
 +      if (n > 0) {
 +        written += static_cast<std::size_t>(n);
 +        wrote_bytes_ += static_cast<std::uint64_t>(n);
-+        if (tx_pacing_us_ > 0) {
-+          // One breath per MiB inside the frame keeps the peer's repost
-+          // loop from running the NHI into the ground on long bursts.
-+          constexpr std::size_t kPacingGranularity = 1u << 20;
-+          pacing_mark += static_cast<std::size_t>(n);
-+          while (pacing_mark >= kPacingGranularity) {
-+            pacing_mark -= kPacingGranularity;
-+            ::usleep(tx_pacing_us_);
-+          }
-+        }
 +        continue;
 +      }
 +      if (n < 0 && errno == EINTR) {
@@ -2065,6 +2147,8 @@ index 0000000..c973c08
 +        // The GPU publishes the staged partial through the ready flag; the
 +        // reader thread finishes the exchange when the peer's frame arrives
 +        // and raises the arrived flag, so the worker only writes its end.
++        // (The driver's TX coalescing stages sub-ring-depth writes and
++        // flushes them the moment this stream reads — the peer wait.)
 +        std::string queued_error;
 +        if (!WaitReady(job.operation_id + 1, &queued_error)) {
 +          queued_error =
@@ -2157,6 +2241,14 @@ index 0000000..c973c08
 +  /// to the GPU's arrived flag. The bootstrap socket is polled alongside the
 +  /// device: it carries nothing after setup, so readable means the peer
 +  /// closed or reset it.
++  /// Reader-thread entry: pins and runs Read(). Managed as a raw
++  /// pthread (see StopReader for why not std::thread).
++  static void* ReadTrampoline(void* self) {
++    PinToCpuFromTop(1);
++    static_cast<Tbstream*>(self)->Read();
++    return nullptr;
++  }
++
 +  void Read() {
 +    for (;;) {
 +      Expected expected;
@@ -2187,6 +2279,9 @@ index 0000000..c973c08
 +    std::uint8_t* window = static_cast<std::uint8_t*>(recv_buffer_) +
 +                           (expected.operation_id % kWindows) * kWindowBytes;
 +    const std::size_t frame_bytes = kDataOffset + expected.bytes;
++    if (coalesce_) {
++      return ReadFrameBuffered(expected, window, frame_bytes);
++    }
 +    std::size_t received = 0;
 +    void* failure = nullptr;
 +    // A blocking read with no poll and no timeout: this driver reports
@@ -2228,6 +2323,93 @@ index 0000000..c973c08
 +    }
 +    CollectiveHeader incoming{};
 +    if (failure == nullptr) {
++      std::memcpy(&incoming, window, sizeof(incoming));
++      if (incoming.magic != kCollectiveMagic ||
++          incoming.version != kCollectiveVersion ||
++          incoming.scope_id != expected.scope_id ||
++          incoming.operation_id != expected.operation_id ||
++          incoming.bytes != expected.bytes) {
++        std::fprintf(stderr,
++                     "tbstream collective mismatch: expected scope %llu "
++                     "operation %llu bytes %llu, received scope %llu "
++                     "operation %llu bytes %llu\n",
++                     static_cast<unsigned long long>(expected.scope_id),
++                     static_cast<unsigned long long>(expected.operation_id),
++                     static_cast<unsigned long long>(expected.bytes),
++                     static_cast<unsigned long long>(incoming.scope_id),
++                     static_cast<unsigned long long>(incoming.operation_id),
++                     static_cast<unsigned long long>(incoming.bytes));
++        failure = reinterpret_cast<void*>(
++            static_cast<std::uintptr_t>(ReaderFailure::kHeader));
++      }
++    }
++    if (failure == nullptr) {
++      return true;
++    }
++    Fail(failure);
++    return false;
++  }
++
++  /// Coalesced-reader path: pulls with read() requests of at least
++  /// ring depth (1 MiB, or the whole frame when larger), parsing frames
++  /// from a flat buffer copied into each receive window. The
++  /// blocking-read parking semantics are unchanged — the request size
++  /// is what keeps the driver's receive path in its bulk shape.
++  [[nodiscard]] bool ReadFrameBuffered(const Expected& expected,
++                                        std::uint8_t* window,
++                                        std::size_t frame_bytes) {
++    void* failure = nullptr;
++    const auto spin_deadline =
++        std::chrono::steady_clock::now() + kExchangeSpinWindow;
++    const std::size_t want_cap =
++        std::max<std::size_t>(kCoalesceBytes * 2, frame_bytes + kCoalesceBytes);
++    if (rx_cap_ < want_cap) {
++      // Grow once; the buffer is zero-filled only on allocation, never
++      // per read.
++      rx_buf_ = std::make_unique<std::uint8_t[]>(want_cap);
++      rx_cap_ = want_cap;
++      rx_have_ = 0;
++      rx_parsed_ = 0;
++    }
++    while (rx_have_ - rx_parsed_ < frame_bytes) {
++      if (rx_parsed_ > 0) {
++        std::memmove(rx_buf_.get(), rx_buf_.get() + rx_parsed_,
++                     rx_have_ - rx_parsed_);
++        rx_have_ -= rx_parsed_;
++        rx_parsed_ = 0;
++      }
++      const ssize_t n =
++          ::read(read_fd_, rx_buf_.get() + rx_have_, rx_cap_ - rx_have_);
++      if (n > 0) {
++        rx_have_ += static_cast<std::size_t>(n);
++        continue;
++      }
++      if (n < 0 && errno == EINTR) {
++        continue;
++      }
++      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        continue;
++      }
++      if (n == 0) {
++        if (std::chrono::steady_clock::now() < spin_deadline) {
++          CpuRelax();
++        } else {
++          ::usleep(100);
++        }
++        continue;
++      }
++      failure = reinterpret_cast<void*>(
++          static_cast<std::uintptr_t>(ReaderFailure::kStreamRead));
++      break;
++    }
++    CollectiveHeader incoming{};
++    if (failure == nullptr) {
++      std::memcpy(window, rx_buf_.get() + rx_parsed_, frame_bytes);
++      rx_parsed_ += frame_bytes;
++      if (rx_parsed_ == rx_have_) {
++        rx_have_ = 0;
++        rx_parsed_ = 0;
++      }
 +      std::memcpy(&incoming, window, sizeof(incoming));
 +      if (incoming.magic != kCollectiveMagic ||
 +          incoming.version != kCollectiveVersion ||
@@ -2349,23 +2531,26 @@ index 0000000..c973c08
 +    }
 +    expected_cv_.notify_all();
 +    arrival_cv_.notify_all();
-+    if (!reader_.joinable()) {
++    if (!reader_tid_valid_) {
 +      return;
 +    }
 +    // A quiescent reader parks on expected_cv_ and exits here, so its
 +    // descriptor can be closed in-process once it is joined. One blocked in
 +    // read(2) on a frame a dead peer never sends cannot be interrupted (the
-+    // driver has no cancel path), so after a bounded join it is detached and
-+    // the descriptor is left to process exit, as before. Either way the
-+    // std::thread must end up not-joinable: a successful raw join leaves its
-+    // handle stale, and detach() clears it (pthread_detach of an
-+    // already-joined thread is a harmless no-op error).
++    // driver has no cancel path), so after a bounded join it is detached
++    // (raw pthread_detach — std::thread::detach() after a successful raw
++    // join calls pthread_detach on the reaped thread and THROWS ESRCH,
++    // which in a noexcept path became std::terminate/SIGABRT after every
++    // fully-successful run) and the descriptor is left to process exit.
 +    struct timespec deadline {};
 +    clock_gettime(CLOCK_REALTIME, &deadline);
 +    deadline.tv_sec += 2;
-+    reader_joined_ = pthread_timedjoin_np(reader_.native_handle(), nullptr,
-+                                          &deadline) == 0;
-+    reader_.detach();
++    reader_joined_ = ::pthread_timedjoin_np(reader_tid_, nullptr, &deadline) ==
++                     0;
++    if (!reader_joined_) {
++      (void)::pthread_detach(reader_tid_);
++    }
++    reader_tid_valid_ = false;
 +  }
 +
 +  void Cleanup() noexcept {
@@ -2375,13 +2560,6 @@ index 0000000..c973c08
 +    StopReader();
 +    control_.reset();
 +    if (fd_ >= 0) {
-+      // Quiesce before the tunnel tears down: after a long burst both NHIs
-+      // are still draining reposts, and an immediate close parks hop
-+      // deactivation in config-space timeouts that wedge the next tunnel
-+      // activation. A short settle is free at process lifetime scale.
-+      if (wrote_bytes_ != 0) {
-+        ::usleep(300'000);
-+      }
 +      ::close(fd_);
 +      fd_ = -1;
 +    }
@@ -2419,12 +2597,16 @@ index 0000000..c973c08
 +  // The reader's blocking descriptor; never closed (see StopReader).
 +  int read_fd_{-1};
 +  // TX pacing (see Initialize): microseconds per MiB inside a frame write.
-+  std::uint32_t tx_pacing_us_{25};
 +  std::uint64_t wrote_bytes_{0};
 +  // Wire representation for large frames (see Initialize's env parse).
 +  TbstreamWire wire_{TbstreamWire::kF32};
 +  void* send_buffer_{nullptr};
 +  void* recv_buffer_{nullptr};
++  bool coalesce_{false};
++  std::unique_ptr<std::uint8_t[]> rx_buf_;
++  std::size_t rx_cap_{0};
++  std::size_t rx_have_{0};
++  std::size_t rx_parsed_{0};
 +  void* send_device_{nullptr};
 +  void* recv_device_{nullptr};
 +  // Queued exchanges' flags (kReadyOffset...) in host memory the GPU maps,
@@ -2456,7 +2638,8 @@ index 0000000..c973c08
 +  // their results in the same order. Lock order: mutex_ before jobs_mutex_
 +  // and expected_mutex_.
 +  std::thread worker_;
-+  std::thread reader_;
++  pthread_t reader_tid_{0};
++  bool reader_tid_valid_{false};
 +  // Reader lifecycle for teardown: whether the reader thread was ever
 +  // started, and whether StopReader() joined it (a quiescent reader parks on
 +  // expected_cv_ and joins; one blocked in read(2) cannot be interrupted).
@@ -3424,10 +3607,10 @@ index 0000000..31e3274
 +esac
 diff --git a/tools/tbstream/tbstream_probe.cpp b/tools/tbstream/tbstream_probe.cpp
 new file mode 100644
-index 0000000..da04cb1
+index 0000000..9cdda4d
 --- /dev/null
 +++ b/tools/tbstream/tbstream_probe.cpp
-@@ -0,0 +1,860 @@
+@@ -0,0 +1,1265 @@
 +// USB4STREAM (/dev/tbstreamX) microbenchmark for the TP=2 tbstream
 +// transport. Host-only: no HIP, no model. Modes:
 +//
@@ -3457,6 +3640,7 @@ index 0000000..da04cb1
 +
 +#include <algorithm>
 +#include <array>
++#include <atomic>
 +#include <cerrno>
 +#include <chrono>
 +#include <cstdint>
@@ -3473,11 +3657,29 @@ index 0000000..da04cb1
 +// Set by --noverify: skip the payload checksums so the measurement shows
 +// the link and driver alone, without the probe's own checksum CPU cost.
 +bool g_skip_checksums = false;
++// --exit-open: leave every stream fd open and let process exit release
++// them (gufo's detached-reader path) instead of explicit close_all().
++bool g_exit_open = false;
++// --batch-bytes N: accumulate outgoing frames and flush in write()s of
++// at least N bytes (0 = one write per frame). The byte stream is
++// order-preserving, so batching is transparent to the peer's parser.
++std::size_t g_batch_bytes = 0;
++// --reader-glutton: the receiving side drains with maximum-size read()s
++// (byte counting) instead of per-frame reads — isolates receiver read
++// granularity as a wedge variable.
++bool g_reader_glutton = false;
++// --reader-buffered: parse frames from 1 MiB read-ahead buffering
++// instead of exact per-frame reads (keeps frame semantics, gets the
++// bulk read shape).
++bool g_reader_buffered = false;
 +
 +constexpr std::uint32_t kHelloMagic = 0x47504248U;  // "GPBH"
 +constexpr std::uint32_t kHelloVersion = 1;
 +constexpr std::uint32_t kFrameMagic = 0x47504246U;  // "GPBF"
 +constexpr std::uint64_t kDataOffset = 64;
++// Largest header+payload frame written through the single-write path;
++// larger frames fall back to separate header/payload writes.
++constexpr std::size_t kStackFrameBytes = 1U << 20;
 +constexpr auto kTimeout = std::chrono::seconds(30);
 +
 +struct Hello {
@@ -3592,6 +3794,7 @@ index 0000000..da04cb1
 +
 +  [[nodiscard]] std::uint64_t written() const noexcept { return written_; }
 +  [[nodiscard]] std::uint64_t read() const noexcept { return read_; }
++  [[nodiscard]] int GluttonFd() const noexcept { return read_fd_; }
 +
 +  [[nodiscard]] bool WriteFrame(std::uint64_t sequence, const void* payload,
 +                                std::size_t bytes, std::string* error) {
@@ -3607,17 +3810,165 @@ index 0000000..da04cb1
 +    };
 +    std::uint8_t frame[kDataOffset];
 +    std::memcpy(frame, &header, sizeof(header));
-+    if (!SendAll(frame, sizeof(frame), error) ||
-+        (bytes != 0 && !SendAll(payload, bytes, error))) {
-+      return false;
++    if (g_batch_bytes > 0) {
++      // Batched mode: accumulate frames and flush in large write()s —
++      // the byte stream is order-preserving, so concatenation is
++      // transparent to the peer's frame parser.
++      const std::uint8_t* parts[2] = {frame, nullptr};
++      const std::size_t lens[2] = {sizeof(frame), bytes};
++      if (bytes != 0) {
++        parts[1] = static_cast<const std::uint8_t*>(payload);
++      }
++      for (int k = 0; k < 2; ++k) {
++        stage_.insert(stage_.end(), parts[k], parts[k] + lens[k]);
++      }
++      written_ += kDataOffset + bytes;
++      if (stage_.size() >= g_batch_bytes) {
++        return FlushStaged(error);
++      }
++      return true;
++    }
++    // Direct mode: header and payload go out in ONE write(), matching
++    // gufo's contiguous frame write (the driver chunks each write()
++    // into 4 KiB frames, so write granularity defines the remainder
++    // frames the wire actually sees).
++    if (bytes + kDataOffset <= kStackFrameBytes) {
++      std::uint8_t combined[kStackFrameBytes];
++      std::memcpy(combined, frame, sizeof(frame));
++      if (bytes != 0) {
++        std::memcpy(combined + sizeof(frame), payload, bytes);
++      }
++      if (!SendAll(combined, kDataOffset + bytes, error)) {
++        return false;
++      }
++    } else {
++      if (!SendAll(frame, sizeof(frame), error) ||
++          (bytes != 0 && !SendAll(payload, bytes, error))) {
++        return false;
++      }
 +    }
 +    written_ += kDataOffset + bytes;
 +    return true;
 +  }
 +
++  [[nodiscard]] bool FlushStaged(std::string* error) {
++    if (stage_.empty()) {
++      return true;
++    }
++    if (!SendAll(stage_.data(), stage_.size(), error)) {
++      return false;
++    }
++    stage_.clear();
++    return true;
++  }
++
++  /// Buffered read-ahead parser: pulls up to 1 MiB per read() and parses
++  /// whole frames from the buffer — the receiver-side bulk shape the
++  /// wedge ablation found clean (reads of ring depth, 256 x 4 KiB).
++  [[nodiscard]] bool ReadFrameBuffered(std::uint64_t expected_sequence,
++                                        void* payload, std::size_t capacity,
++                                        std::size_t* bytes,
++                                        std::string* error) {
++    while (refill_.size() < kDataOffset ||
++           refill_.size() - parsed_ < kDataOffset) {
++      if (!RefillMore(error)) {
++        return false;
++      }
++    }
++    while (refill_.size() - parsed_ < kDataOffset + PeekPayloadSize()) {
++      if (!RefillMore(error)) {
++        return false;
++      }
++    }
++    FrameHeader header{};
++    std::memcpy(&header, refill_.data() + parsed_, sizeof(header));
++    if (header.magic != kFrameMagic || header.version != 1 ||
++        header.sequence != expected_sequence || header.bytes > capacity) {
++      *error = "frame header mismatch: sequence " +
++               std::to_string(header.sequence) + " of " +
++               std::to_string(header.bytes) + " bytes";
++      return false;
++    }
++    while (refill_.size() - parsed_ < kDataOffset + header.bytes) {
++      if (!RefillMore(error)) {
++        return false;
++      }
++    }
++    if (header.bytes != 0) {
++      std::memcpy(payload, refill_.data() + parsed_ + kDataOffset,
++                  header.bytes);
++    }
++    parsed_ += kDataOffset + header.bytes;
++    if (parsed_ == refill_.size()) {
++      refill_.clear();
++      parsed_ = 0;
++    }
++    const std::uint32_t checksum =
++        g_skip_checksums
++            ? header.checksum
++            : Checksum(static_cast<const std::uint8_t*>(payload),
++                       header.bytes,
++                       static_cast<std::uint32_t>(expected_sequence));
++    if (checksum != header.checksum) {
++      *error = "frame checksum mismatch at sequence " +
++               std::to_string(expected_sequence);
++      return false;
++    }
++    *bytes = header.bytes;
++    read_ += kDataOffset + header.bytes;
++    return true;
++  }
++
++  [[nodiscard]] std::size_t PeekPayloadSize() {
++    if (refill_.size() - parsed_ < kDataOffset) {
++      return 0;
++    }
++    FrameHeader header{};
++    std::memcpy(&header, refill_.data() + parsed_, sizeof(header));
++    return header.bytes;
++  }
++
++  [[nodiscard]] bool RefillMore(std::string* error) {
++    std::uint8_t chunk[1U << 20];
++    const ssize_t n = ::read(read_fd_, chunk, sizeof(chunk));
++    if (n > 0) {
++      refill_.insert(refill_.end(), chunk, chunk + n);
++      refill_waited_ = std::chrono::steady_clock::now();
++      return true;
++    }
++    if (n < 0 && errno == EINTR) {
++      return true;
++    }
++    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++      // Nonblocking source (loop mode) or transient empty ring.
++      ::usleep(100);
++      if (std::chrono::steady_clock::now() - refill_waited_ >
++          std::chrono::seconds(30)) {
++        *error = "buffered read timed out waiting for peer data";
++        return false;
++      }
++      return true;
++    }
++    if (n == 0) {
++      ::usleep(100);
++      if (std::chrono::steady_clock::now() - refill_waited_ >
++          std::chrono::seconds(30)) {
++        *error = "buffered read timed out waiting for peer data";
++        return false;
++      }
++      return true;
++    }
++    *error = ErrnoText("buffered read");
++    return false;
++  }
++
 +  [[nodiscard]] bool ReadFrame(std::uint64_t expected_sequence, void* payload,
 +                               std::size_t capacity, std::size_t* bytes,
 +                               std::string* error) {
++    if (g_reader_buffered) {
++      return ReadFrameBuffered(expected_sequence, payload, capacity, bytes,
++                               error);
++    }
 +    std::uint8_t head[kDataOffset];
 +    if (!RecvAll(head, sizeof(head), error)) {
 +      return false;
@@ -3716,14 +4067,22 @@ index 0000000..da04cb1
 +      if (n == 0) {
 +        // The device reports an empty ring as a zero-byte read; the frame
 +        // may still be in flight. Spin briefly so an imminent arrival pays
-+        // no sleep granularity, then pause and read again.
++        // no sleep granularity, then pause and read again. A peer that
++        // exited (driver CLOSE) also yields zero-byte reads — fail after
++        // a bounded wait instead of spinning forever on a truncated
++        // stream.
 +        const auto spin_deadline = start + std::chrono::milliseconds(5);
 +        if (std::chrono::steady_clock::now() < spin_deadline) {
 +#if defined(__x86_64__) || defined(__i386__)
 +          __builtin_ia32_pause();
 +#endif
-+        } else {
++        } else if (std::chrono::steady_clock::now() <
++                   start + std::chrono::seconds(30)) {
 +          ::usleep(100);
++        } else {
++          *error = "read timed out waiting for peer data (peer exited "
++                   "early, or truncated stream)";
++          return false;
 +        }
 +        continue;
 +      }
@@ -3737,6 +4096,11 @@ index 0000000..da04cb1
 +  int read_fd_;
 +  std::uint64_t written_{0};
 +  std::uint64_t read_{0};
++  std::vector<std::uint8_t> stage_;
++  std::vector<std::uint8_t> refill_;
++  std::size_t parsed_{0};
++  std::chrono::steady_clock::time_point refill_waited_{
++      std::chrono::steady_clock::now()};
 +};
 +
 +/// The TCP coordination channel: ranks exchange their parameters and a go
@@ -4031,7 +4395,8 @@ index 0000000..da04cb1
 +int RunPair(const std::string& mode, std::uint32_t rank,
 +            const std::string& peer, std::uint16_t port,
 +            const std::vector<std::string>& devices,
-+            const std::vector<std::size_t>& sizes, std::uint32_t frames) {
++            const std::vector<std::size_t>& sizes, std::uint32_t frames,
++            int pairing_close, int idle_seconds) {
 +  const std::size_t links = devices.size();
 +  std::string error;
 +  Pairing pairing = rank == 0 ? Pairing::Listen(port, &error)
@@ -4086,7 +4451,20 @@ index 0000000..da04cb1
 +    close_all();
 +    return Fail("pairing readiness: " + error);
 +  }
-+  pairing.Close();
++  // Pairing-socket lifecycle for the wedge ablation:
++  //   0 "early"    — close before traffic (stock probe behaviour)
++  //   1 "teardown" — hold through the session, close right before the
++  //                  stream fds (mirrors gufo's control_.reset() position)
++  //   2 "last"     — close after the stream fds (fix-candidate order)
++  if (pairing_close == 0) {
++    pairing.Close();
++  }
++  if (idle_seconds > 0) {
++    // Hold every stream fd idle-open before the traffic burst — mirrors
++    // gufo's timeline (device opened, ~36 s model load, then collectives).
++    std::printf("idle-open %d s before traffic\n", idle_seconds);
++    ::sleep(idle_seconds);
++  }
 +  std::vector<Stream> streams;
 +  for (const auto& pair : opened) {
 +    streams.emplace_back(pair[0], pair[1]);
@@ -4097,6 +4475,127 @@ index 0000000..da04cb1
 +  }
 +  std::printf("\n");
 +  const auto run_start = std::chrono::steady_clock::now();
++  if (mode == "fulldup") {
++    // Both ranks write continuously while a dedicated reader thread
++    // drains the peer's frames — gufo's always-draining-reader
++    // architecture with simultaneous bidirectional bulk. One pass over
++    // all sizes; the reader drains every size, the writer sweeps them.
++    // The reader context is heap-allocated so a detached reader
++    // (--exit-open) never touches destroyed locals; it is leaked
++    // deliberately, as the process exits immediately after.
++    struct ReaderCtx {
++      std::vector<int> write_fds;
++      std::vector<int> read_fds;
++      std::vector<std::size_t> sizes;
++      std::uint32_t frames;
++      bool starve_at_end;
++    };
++    ReaderCtx* ctx = new ReaderCtx{};
++    for (const auto& pair : opened) {
++      ctx->write_fds.push_back(pair[0]);
++      ctx->read_fds.push_back(pair[1]);
++    }
++    ctx->sizes = sizes;
++    ctx->frames = frames;
++    ctx->starve_at_end = g_exit_open;
++    auto* reader_ok = new std::atomic<int>{0};
++    auto* received = new std::atomic<std::uint64_t>{0};
++    auto* reader_error = new std::string{};
++    std::thread reader([ctx, reader_ok, received, reader_error]() {
++      const std::size_t links = ctx->read_fds.size();
++      std::vector<Stream> rstreams;
++      for (std::size_t k = 0; k < links; ++k) {
++        rstreams.emplace_back(ctx->write_fds[k], ctx->read_fds[k]);
++      }
++      for (std::size_t rsize : ctx->sizes) {
++        Windows rwindows(std::max<std::size_t>(rsize, 1));
++        for (std::uint32_t i = 0; i < ctx->frames; ++i) {
++          Stream& stream = rstreams[i % links];
++          std::size_t bytes = 0;
++          std::string error;
++          if (!stream.ReadFrame(i, rwindows.At(i), rsize, &bytes, &error)) {
++            *reader_error = "fulldup read: " + error;
++            reader_ok->store(1);
++            return;
++          }
++        }
++        received->fetch_add(static_cast<std::uint64_t>(rsize) * ctx->frames);
++      }
++      reader_ok->store(2);
++      if (ctx->starve_at_end) {
++        // Park in read(2) on a frame the peer never sends — gufo's
++        // end-of-life reader state; the descriptor is released at
++        // process exit with the reader still parked.
++        const std::size_t last = ctx->sizes.back();
++        std::vector<std::uint8_t> sink(last + 1);
++        std::size_t bytes = 0;
++        std::string error;
++        (void)rstreams[0].ReadFrame(ctx->frames, sink.data(), last, &bytes,
++                                    &error);
++      }
++    });
++    const auto start = std::chrono::steady_clock::now();
++    for (std::size_t size : sizes) {
++      const auto payload = std::make_unique<std::uint8_t[]>(size + 1);
++      FillPayload(payload.get(), size, 7);
++      for (std::uint32_t i = 0; i < frames; ++i) {
++        Stream& stream = streams[i % links];
++        if (!stream.WriteFrame(i, payload.get(), size, &error)) {
++          reader.detach();
++          return Fail("fulldup write: " + error);
++        }
++      }
++      std::printf("fulldup %zu bytes: written\n", size);
++    }
++    const auto end = std::chrono::steady_clock::now();
++    if (!g_exit_open) {
++      reader.join();
++      if (reader_ok->load() != 2) {
++        return Fail(reader_error->empty() ? "fulldup reader failed"
++                                          : *reader_error);
++      }
++      ReportBandwidth(
++          streams[0].written() + (links > 1 ? streams[1].written() : 0),
++          end - start, "sent");
++      ReportBandwidth(received->load(), end - start, "received");
++      delete ctx;
++      delete reader_ok;
++      delete received;
++      delete reader_error;
++    } else {
++      // gufo shape: the reader parks in read(2) after draining; leave
++      // every descriptor (and the reader context) to process exit.
++      reader.detach();
++      // Lockstep end: hold the pairing socket so both ranks reach this
++      // barrier before either exits — gufo's collectives end in
++      // lockstep, so neither side tears the stream down under the
++      // other's writes.
++      if (pairing_close != 0) {
++        std::string barrier_error;
++        if (!pairing.Ready(&barrier_error)) {
++          return Fail("exit barrier: " + barrier_error);
++        }
++      }
++    }
++    if (pairing_close == 1) {
++      pairing.Close();
++    }
++    if (g_batch_bytes > 0) {
++      for (Stream& stream : streams) {
++        if (!stream.FlushStaged(&error)) {
++          return Fail("flush staged: " + error);
++        }
++      }
++    }
++    if (!g_exit_open) {
++      close_all();
++    }
++    if (pairing_close == 2) {
++      pairing.Close();
++    }
++    std::printf("fulldup rank %u: ok\n", rank);
++    return 0;
++  }
 +  for (std::size_t size : sizes) {
 +    Windows windows(std::max<std::size_t>(size, 1));
 +    const auto payload = std::make_unique<std::uint8_t[]>(size + 1);
@@ -4152,6 +4651,32 @@ index 0000000..da04cb1
 +            return Fail("bw write: " + error);
 +          }
 +        }
++      } else if (g_reader_glutton) {
++        // Wedge ablation: drain with the largest read()s possible,
++        // counting raw bytes instead of parsing frames — frees many
++        // ring slots per syscall (bulk-style) while the sender still
++        // sends small app-frames.
++        std::uint64_t total = 0;
++        const std::uint64_t expected =
++            static_cast<std::uint64_t>(size) * frames + kDataOffset * frames;
++        std::vector<std::uint8_t> sink(1U << 20);
++        while (total < expected) {
++          const ssize_t n = ::read(streams[0].GluttonFd(), sink.data(),
++                                   std::min<std::size_t>(sink.size(),
++                                                         expected - total));
++          if (n > 0) {
++            total += static_cast<std::uint64_t>(n);
++            continue;
++          }
++          if (n < 0 && errno == EINTR) {
++            continue;
++          }
++          if (n == 0) {
++            ::usleep(100);
++            continue;
++          }
++          return Fail("glutton read: " + ErrnoText("read"));
++        }
 +      } else {
 +        for (std::uint32_t i = 0; i < frames; ++i) {
 +          Stream& stream = streams[i % links];
@@ -4201,22 +4726,54 @@ index 0000000..da04cb1
 +                          .c_str());
 +    }
 +  }
-+  close_all();
++  if (g_batch_bytes > 0) {
++    for (Stream& stream : streams) {
++      if (!stream.FlushStaged(&error)) {
++        return Fail("flush staged: " + error);
++      }
++    }
++  }
++  if (pairing_close != 0) {
++    // Post-traffic barrier: the driver discards a sender's
++    // accepted-but-undelivered TX tail when its last fd closes, so the
++    // writer must not exit before the peer finished reading
++    // (gufo's lockstep collectives get this for free).
++    std::string barrier_error;
++    if (!pairing.Ready(&barrier_error)) {
++      return Fail("end barrier: " + barrier_error);
++    }
++  }
++  if (pairing_close == 1) {
++    pairing.Close();
++  }
++  if (!g_exit_open) {
++    close_all();
++  }
++  if (pairing_close == 2) {
++    pairing.Close();
++  }
 +  std::printf("%s rank %u: ok\n", mode.c_str(), rank);
 +  return 0;
 +}
 +
 +void Usage() {
 +  std::printf(
-+      "usage: tbstream_probe --mode loop|ping|bw|exchange|smoke\n"
++      "usage: tbstream_probe --mode loop|ping|bw|exchange|smoke|fulldup\n"
 +      "                      [--rank 0|1] [--peer HOST] [--port 18530]\n"
 +      "                      [--fd /dev/tbstream0[,/dev/tbstream1...]]\n"
 +      "                      [--bytes 10240[,5242880]] [--frames 1000]\n"
 +      "                      [--stripe N] [--noverify]\n"
++      "                      [--pairing early|teardown|last]\n"
++      "                      [--idle-seconds N] [--exit-open]\n"
++      "                      [--batch-bytes N]\n"
 +      "multiple --fd paths stripe frames round-robin over that many links\n"
 +      "(--stripe must match the --fd count). loop runs in one process over\n"
 +      "socketpairs; every other mode needs one process per rank, rank 1\n"
-+      "given rank 0's address in --peer.\n");
++      "given rank 0's address in --peer. --pairing controls when the\n"
++      "coordination socket closes: early (before traffic, default),\n"
++      "teardown (right before the stream fds, gufo-style) or last (after\n"
++      "the stream fds). fulldup runs a dedicated draining reader thread\n"
++      "while writing — simultaneous bidirectional bulk, gufo-style.\n");
 +}
 +
 +}  // namespace
@@ -4230,6 +4787,8 @@ index 0000000..da04cb1
 +  std::string bytes_text = "10240";
 +  std::uint32_t frames = 1000;
 +  std::uint32_t stripe = 0;
++  int pairing_close = 0;
++  int idle_seconds = 0;
 +  for (int i = 1; i < argc; ++i) {
 +    const std::string arg = argv[i];
 +    const auto next = [&]() -> std::string {
@@ -4252,11 +4811,39 @@ index 0000000..da04cb1
 +          std::strtoul(next().c_str(), nullptr, 10));
 +    } else if (arg == "--bytes") {
 +      bytes_text = next();
++    } else if (arg == "--exit-open") {
++      g_exit_open = true;
++    } else if (arg == "--reader-buffered") {
++      g_reader_buffered = true;
++    } else if (arg == "--reader-glutton") {
++      g_reader_glutton = true;
++    } else if (arg == "--batch-bytes") {
++      g_batch_bytes = static_cast<std::size_t>(
++          std::strtoull(next().c_str(), nullptr, 10));
 +    } else if (arg == "--noverify") {
 +      g_skip_checksums = true;
 +    } else if (arg == "--frames") {
 +      frames = static_cast<std::uint32_t>(
 +          std::strtoul(next().c_str(), nullptr, 10));
++    } else if (arg == "--idle-seconds") {
++      idle_seconds = static_cast<int>(
++          std::strtol(next().c_str(), nullptr, 10));
++      if (idle_seconds < 0) {
++        std::fprintf(stderr, "invalid --idle-seconds\n");
++        return 2;
++      }
++    } else if (arg == "--pairing") {
++      const std::string choice = next();
++      if (choice == "early") {
++        pairing_close = 0;
++      } else if (choice == "teardown") {
++        pairing_close = 1;
++      } else if (choice == "last") {
++        pairing_close = 2;
++      } else {
++        std::fprintf(stderr, "invalid --pairing (early|teardown|last)\n");
++        return 2;
++      }
 +    } else if (arg == "--help" || arg == "-h") {
 +      Usage();
 +      return 0;
@@ -4281,10 +4868,11 @@ index 0000000..da04cb1
 +    return RunLoop(sizes, frames, devices.size());
 +  }
 +  if (mode != "ping" && mode != "bw" && mode != "exchange" &&
-+      mode != "smoke") {
++      mode != "smoke" && mode != "fulldup") {
 +    std::fprintf(stderr, "unknown mode: %s\n", mode.c_str());
 +    Usage();
 +    return 2;
 +  }
-+  return RunPair(mode, rank, peer, port, devices, sizes, frames);
++  return RunPair(mode, rank, peer, port, devices, sizes, frames,
++                 pairing_close, idle_seconds);
 +}
