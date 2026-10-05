@@ -54,6 +54,24 @@ cross-rank traffic on the stream transport, Qwen3.8-Flash-Next Q4:
 | Decode tg @ ~61–65k, mixed corpus | 32.6 | 62.6 ¹ | ~+92 % ¹ |
 | Decode tg @ ~61–65k, repetitive corpus | 46.1 | 62.6 ¹ | ~+36 % ¹ |
 
+**Current baseline (2026-10-05, after the wedge fix and the gufo rebase
+onto neuhaus `feat/tp2-rdma`; kernel "baseline-B", gufo `b7ee0a9`,
+GPUs forced high; `evidence/perf-baseline/`):**
+
+| Measurement | Result | Historical reference |
+| --- | ---: | ---: |
+| Prefill, 8 k tokens ×2 members (probe) | **2212 tok/s** | 2164 |
+| Prefill, 61 k tokens single (probe) | **2149 tok/s** | 2104.6 (serve) |
+| Decode, MTP serve (counting, cold / warm) | **68.6 / 73.2 tok/s** | 61.6 |
+| Decode, non-MTP (sanity) | ~34 tok/s | 33.8 |
+| Exchange p50, 10 KiB (decode shape) | 27.1 µs | 26.9 µs |
+| Exchange p50, 5 MiB (prefill shape) | 1393 µs | 1296 µs |
+
+Zero errors and zero link events across every run. Note: the headline
+decode figures require `--speculative mtp --mtp-model
+mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; without MTP serve decodes at
+the ~34 tok/s non-speculative rate.
+
 - Single-host best (depth 0) is 1628.5 pp / 59.2 tg-repetitive — the
   long-context rows above are where TP2 pulls far ahead.
 - The pair is also a capacity unlock: **Q8 at 262 144-token context**
@@ -68,19 +86,34 @@ gains are solid. **Benchmark-grade dual-host runs (gufo's bench
 harness, both corpora, tg128, multi-user) are the pending
 measurement** — see Ongoing work.
 
-**3. A link that survives its own hardware.** The Barlow Ridge
-host-to-host link has a failure mode where stream teardown desyncs
-one host's NHI control plane until reboot (correlated with individual
-cable ends; see `docs/wedge-investigation.md`). It is now fully
-self-healing: detection, forced link disconnect/retrain, re-
-enumeration and re-configuration happen autonomously in ~8 s, with
-serving continuing through the event.
+**3. A link that survives its own hardware — and a wedge trigger that
+is now fixed.** The Barlow Ridge host-to-host link has a failure mode
+where stream teardown desyncs one host's NHI control plane until reboot
+(see `docs/wedge-investigation.md`). Two layers now address it:
+
+- **Root cause found and fixed (2026-10-05):** the trigger is a stream
+  teardown while the peer still has the stream mid-flight — proven by an
+  interleaved ablation where the identical small-frame workload went
+  3/3-fail with an early close and 0/3 with a delivery-confirmed close.
+  Adopting the upstream CLOSE/drain rework (plus our HopID fixes; build
+  `kernel/candidate-b/`, "baseline-B") eliminates the reproducer:
+  0/3 + 0/10 episodes where the old build failed 3/3 the same day, and
+  9/10 clean serve-restart cycles with the one failure explained and
+  fixed (rank model-load skew, now covered by the verbs transport's
+  slow-peer deadlines).
+- **Self-healing for whatever remains:** detection, forced link
+  disconnect/retrain, re-enumeration and re-configuration happen
+  autonomously in ~8 s, with serving continuing through the event.
 
 ## Ongoing work
 
-- **Avoid wedges in the first place**: the trigger is cable-end
-  correlated and rate independent — a passive (non-retimed) certified
-  cable is the leading candidate for a wedge-free physical layer.
+- **Wedge residuals**: the primary trigger (teardown while the peer is
+  mid-stream) is fixed by baseline-B; what remains is to quantify any
+  cable-end-correlated residue with controlled cable-identification
+  blocks (the earlier "cable-only" attribution was retired — the
+  `0x12/0x16` timeout lines are local hop-table entries, not retimer
+  routes), and to fix the keepalive notification-suppression bug in the
+  healing xdomain code at the next kernel window.
 - **Keep hardening the self-heal**: the settle-window recovery path is
   design-fixed but not yet observed end-to-end in the wild; the
   control-channel stall race quarantined behind the XDomain workqueue
