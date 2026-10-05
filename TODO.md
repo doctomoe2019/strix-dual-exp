@@ -144,6 +144,23 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 12:15 PERFORMANCE BASELINE (baseline-B kernel + rebased
+  gufo b7ee0a9, GPUs forced high both hosts, evidence/perf-baseline/):
+  | Metric | Today | Historical | Verdict |
+  |---|---|---|---|
+  | prefill 8K x2 (probe) | 2212 tok/s | 2164 | +2.2% |
+  | prefill 61K single (probe) | 2149 tok/s | 2104.6 (serve) | +2.1% |
+  | decode MTP serve, counting | 68.6 cold / 73.2 warm tok/s | 61.6 | +12/+19% |
+  | decode non-MTP (sanity) | ~34 tok/s | 33.8 | parity |
+  | exchange p50 10 KiB (decode shape) | 27.1 us | 26.9 | parity |
+  | exchange p50 5 MiB (prefill shape) | 1393 us | 1296 | +7% (no serving impact) |
+  Zero poison/timeouts/wedge errors in every run; dmesg clean. The
+  user-facing ~2100pp/~65tg targets are MET or EXCEEDED. Gotcha that
+  cost two runs: the headline decode numbers REQUIRE --speculative mtp
+  --mtp-model /models/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf; without
+  them serve decodes at the non-MTP ~34 tok/s (matches history exactly).
+  gpu-performance.service failed on hostB after the reboot — restart it
+  before any measurement (clocks park at 600 MHz otherwise).
 - 2026-10-05 11:50 SESSION MILESTONES (all on frozen baseline-B):
   - **B0x10 serve-restart block: 9/10 clean, 0 link episodes** (run-
     20261005-105857). The 1 failure was rank SKEW (rank0's 10th model
