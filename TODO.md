@@ -144,6 +144,25 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 21:00 H1 REJECTED + C1 CLOSED (gufo @ 3954b59 docs-only; code
+  back to fb0dc77 state; serve binary c4d3dce unchanged/current):
+  H1 (fixed-geometry hidden=2560 Vec4 combine specialization, both plain
+  and peer kernels): bit-exact by construction, operator test exact at
+  37/2048; ISA had shown 41% integer/select ops — but kernel moved only
+  -1.4%/call (1690 vs 1714us, matched slow-mode profiles, expert-GEMM
+  controls +-1-2%) and end-to-end 2/3 pairs <=+1%, single-host even
+  (1543-1588 both arms @32k). Combine is latency/bandwidth-bound, not
+  issue-bound. Reverted; EXPERIMENTS row recorded. C1 (chunk-width
+  re-sweep, single-variable builds, canary pairs, checksums canonical):
+  1536 lanes -3.7/-5.0% (exchanges 1632->2208); 3072 lanes +1.3/+0.9/+1.4%
+  @32k (exchanges ->1248) but -2.1% @8k (ragged 2048-tail chunk). 2048
+  retained; depth-adaptive width only for long-prompt-dominated workloads.
+  Probe binaries on both hosts: probe-h1 (=H1, reverted upstream),
+  probe-lane1536/3072 (=sweep variants, kPrefillChunkTokens back to 2048 in
+  tree), probe-m1 = CURRENT reference. Remaining ranking after today:
+  #1 combine via different mechanism (residual layout/store width — bigger
+  design), #2 replicated-family split w/ cost model (HC low-rank caps it),
+  #3 single-host kernel work (only route to 3k).
 - 2026-10-05 19:30 STAGE 1 CORRECTED + ALIAS FIX + STAGE 1b SHIPPED (gufo @
   fb0dc77: d118e85 alias guard, c9293ea kv-only paired catch-up, fb0dc77
   probe warmup/MTP; evidence/prefill-triage/ab-stage1b/): (1) Stage-1's

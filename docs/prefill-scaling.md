@@ -179,25 +179,28 @@ Excess decomposition (per rank, at 32 k):
 
 ## Optimization ranking
 
-1. **[Stage 1, DONE 2026-10-05: retained, see above — median +1.9 % and
-   variance collapse; the traffic saving was limited by MALL cache.]**
-   Fuse the peer add into the combine.
-2. **Combine-kernel efficiency** (helps single AND dual): the wide Vec4
-   combine moves ≥210 MiB/boundary at ~168 GB/s against a ~240 GB/s
-   measured ceiling — up to ~800 ms/rank headroom at 32 k. Needs dedicated
-   kernel work (occupancy/ISA); several broad variants are already rejected
-   in gufo's experiment history, so target the specific dispatch.
-3. **Split the replicated dense/W8A8/mix family** (hyperconnection and
-   indexer projections): up to ~1.2 s/rank more. Larger blast radius
-   (numerical contracts per shape); evaluate with the cost model first —
-   note the HC mixing has a low-rank factorization, which caps what any
-   exchange-based split can save.
-4. Kernel-level prefill speedups help single and dual equally; they are the
-   only route to 3 k tok/s on this partition — the fixes above alone
-   plateau well below it because ~35 % of the per-rank time is still
-   replicated or overhead work.
+1. **[Stage 1, DONE: retained, +0.9 % steady-state median — see above.]**
+2. **[Stage 1b, DONE: retained, +2.1 % on paired MTP prefill — see above.]**
+3. **Combine-kernel efficiency — the cheap route is DEAD (H1, rejected
+   2026-10-05).** Constant-folding the index math (a fixed-geometry
+   hidden=2560 specialization, ISA showed 41 % integer/select instructions)
+   kept every output bit but moved the kernel only −1.4 % per call
+   (1 690 vs 1 714 µs, matched slow-mode profiles; expert-GEMM controls
+   ±1–2 %) and end-to-end stayed within noise. The combine is
+   latency/bandwidth-bound; the ~800 ms/rank headroom at 32 k would need a
+   different mechanism (e.g. a different residual layout or store width),
+   not instruction diet.
+4. **Chunk-width re-sweep (C1, 2026-10-05, closed): 2 048 retained.**
+   1 536-token lanes −3.7/−5.0 % @32 k; 3 072-token lanes +1.3/+0.9/+1.4 %
+   @32 k (24 % fewer layer exchanges) but −2.1 % @8 k (ragged tail).
+   Mixed-sign at ~1 %.
+5. **Split the replicated dense/W8A8/mix family** (hyperconnection and
+   indexer projections): up to ~1.2 s/rank more. Larger blast radius;
+   evaluate with the cost model first — the HC mixing has a low-rank
+   factorization, which caps what any exchange-based split can save.
+6. Kernel-level prefill speedups help single and dual equally; they are the
+   only route to 3 k tok/s on this partition.
 
-Not worth pursuing for prefill: wire quantization (already measured +2–4 %
-ceiling), link latency (fully hidden), chunk-size tuning at depth (exchange
-count is per-layer, not per-chunk, and the 20 MiB frames already amortize
-framing).
+Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
+measured), link latency (fully hidden), chunk-size tuning (C1 closed),
+instruction-level combine tuning (H1 rejected).
