@@ -148,3 +148,31 @@ Withdrawn/qualified conclusions (do not build on these):
   ONE reboot authorized for the kernel baseline; after that kernel frozen
   and recovery takes precedence (120 s recovery deadline, no auto-reboot,
   user away for hours). Execution begins at Stage 0.
+- 2026-10-05 10:34 Stage-0 RESULT (run-20261005-102932, current kernel
+  0CAA7B4C/2572A827, tx_coalesce=N): **A7 3/3 workload-fail + 3/3 link
+  episodes; A18 (A7 + --pairing teardown ONLY) 0/3 clean; A17 0/3 clean;
+  B0 gufo 0/3 clean.** A18 receiver fully delivered all 67 MiB each run
+  (2.35/5.21/5.13 GB/s). Timeline (A7-c1 dmesg): sender finishes in ~14
+  ms, early close -> SENDER-side hop-deactivation config timeouts
+  (05:55:20-27) -> receiver still mid-drain hangs -> remote timeout kill
+  -> hostB teardown errors follow. **Mechanism: teardown while the peer
+  still has the stream mid-flight / tail unconsumed.** "Both sides >=1
+  MiB syscalls" is DEAD as the explanation; the completion barrier is
+  the discriminator. Explains: serve wedges at restart (rank0 _Exit
+  after peer loss = teardown under desync), long-lived sessions safe,
+  A17's earlier "fix" (it had the barrier all along).
+- 2026-10-05 11:0x Stage-1: candidate-b built clean first try
+  (thunderbolt 6F77780E, stream BB7FD35F: upstream-next stream.c
+  wholesale [busy-poll lock fix, RX polling, CLOSE write-side handling,
+  framing-error -EIO, upstream stop ordering] + hop rotation + ida fix
+  re-applied; nhi.c stock + tb_ring_poll_pending + descriptor-write-
+  in-poll; healing xdomain/tb unchanged; NO coalescer, NO teardown
+  reorder). Deployed to /lib/modules + initramfs BOTH hosts (backup:
+  /root/modules-backup-preB on each). hostB rebooted first: running
+  6F77780E/BB7FD35F, 0 ida warnings, healer active. Cross-version ping
+  smoke (old hostA <-> new hostB): p50 16.3 us, both RC=0.
+  postboot-validate.service ARMED on hostA: at next boot it waits for
+  pair health then reruns ARMS=A7,A18,A17,B0 ROUNDS=3 autonomously ->
+  evidence/postboot-*.log. hostA reboot is the last action of this
+  session; validation results are on disk for the next session.
+
