@@ -21,12 +21,17 @@ done | head -1)
 [ -n "$SVC" ] || { echo "ERROR: no kstreamp service found under any router port"; ls /sys/bus/thunderbolt/devices/ | tr '\n' ' '; echo; exit 1; }
 echo "service dir: $SVC"
 
-# 3. Create the stream configfs under the CORRECT service dir
+# 3. Create the stream configfs under the CORRECT service dir.
+#    EXPLICIT HopIDs 16/16: tbnet requires HopID 8 (TBNET_HOPID) and
+#    probes whenever the xd enumerates; auto-negotiation (-1) takes 8/9
+#    and wins that race whenever bringup runs first (observed 2026-10-05:
+#    "thunderbolt-net: failed to allocate Rx HopID" on both hosts after
+#    the dual reboot). 16 never contends.
 BASE=/sys/kernel/config/thunderbolt/stream
 mkdir -p $BASE/$SVC 2>/dev/null || true
 mkdir $BASE/$SVC/gufo 2>/dev/null || true
-echo -1 > $BASE/$SVC/gufo/in_hopid
-echo -1 > $BASE/$SVC/gufo/out_hopid
+echo 16 > $BASE/$SVC/gufo/in_hopid
+echo 16 > $BASE/$SVC/gufo/out_hopid
 echo 1 > $BASE/$SVC/gufo/busy_poll
 
 # 4. Wait for genuine attach (character device + O_NONBLOCK open succeeds)

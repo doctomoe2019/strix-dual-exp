@@ -144,6 +144,23 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 ~10:55 STAGE-1 DECISION GATE PASSED. Baseline-B (thunderbolt
+  6F77780E, stream BB7FD35F, both hosts LOADED and verified):
+  **A7 0/3 fail, 0/3 episodes; A18 0/3; A17 0/3; B0 0/3 — all clean**
+  (run-20261005-105121, autonomous postboot block). Same A7 traffic was
+  3/3 fail + 3/3 episodes on the old build the same morning. The upstream
+  CLOSE/drain rework fixed the teardown-under-truncation wedge trigger.
+  ADOPT baseline-B. KERNEL FROZEN for this window (per plan). n=3 caveat:
+  A7x10 validation block running; honest bounds: 0/3 => ~63% upper CI,
+  0/10 => ~26%.
+- 2026-10-05 ~10:50 REGRESSION FOUND+FIXED (ops, not kernel): after the
+  dual reboot BOTH hosts hit "thunderbolt-net: failed to allocate Rx
+  HopID" — heal-watch's bringup (auto -1 HopIDs, takes 8/9) won the race
+  against tbnet's probe (needs HopID 8). Fixed: bringup.sh now pins
+  in/out_hopid=16/16 (never contends); recovery was stream rmdir +
+  thunderbolt-net SERVICE driver rebind (safe; NOT the NHI). tbnet +
+  stream both healthy at 16/16. postboot-validate.service DISABLED after
+  its successful one-shot run.
 - 2026-10-05 (session start): plan finalized per user: healing stays in;
   ONE reboot authorized for the kernel baseline; after that kernel frozen
   and recovery takes precedence (120 s recovery deadline, no auto-reboot,
