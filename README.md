@@ -9,6 +9,11 @@ USB4/TB5 host-to-host links, the gufo-side TP2 integration, the
 operational tooling that keeps the pair alive, and the investigation
 that made the link resilient enough to serve from.
 
+**[SETUP.md](SETUP.md) is the step-by-step guide to replicating the
+whole pair from this repository** (kernel modules, stream bring-up,
+healers, gufo build, qualification and the performance measurements),
+verified end to end on 2026-10-05.
+
 ## The setup
 
 - Two identical Strix Halo mini-PCs (AMD RYZEN AI MAX+ 395 class, 122 GB
