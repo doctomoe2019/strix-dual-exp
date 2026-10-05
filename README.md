@@ -66,20 +66,28 @@ forced high; `evidence/perf-baseline/`):
 
 | Configuration | Prefill @ ~62 k depth (tok/s) | Decode, counting prompt (tok/s) |
 | --- | ---: | ---: |
-| Single host, non-MTP | 1511 | 24.3 |
-| Single host, MTP | 1540 | **66.1** (82 % draft accepted) |
+| Single host, non-MTP | 1511 | 24.3–27.2 ² |
+| Single host, MTP | 1540 | **56.6–66.1** (82 % draft accepted) ² |
 | Dual-host TP2, non-MTP | 2030 ¹ | 34.0–35.5 (serve) · 57.8 (probe, 2-member batch) |
 | Dual-host TP2, MTP | 2030 ¹ | **68.6 cold / 73.2 warm** |
 
 ¹ Prefill rate is MTP-independent (speculation is decode-only); the
 single-host 1511→1540 spread is run-to-run variance. Dual prefill via
 gufo serve = 2030; the host-only probe harness measures 2149 at 61 k
-(no HTTP/scheduler in the path). Mode-matched dual-vs-single gains:
-prefill **+34 %** (2030/1511, serve harness), decode non-MTP **+40 %**
-(34.0/24.3), decode MTP **+4 % cold / +11 % warm** — tensor-parallel
-splitting halves each host's weight traffic, which mostly benefits the
-bandwidth-bound non-speculative paths; on this prompt MTP already
-delivers most of the decode speed a single host can reach.
+(no HTTP/scheduler in the path).
+
+² Single-host decode was re-measured after a sanity challenge:
+non-MTP is stable per session (27.2 twice in a clean session; 24.3
+right after a deep-prefill session — GTT state), while MTP-mode
+varies ±8 % across sessions (56.6 cold / 61.8 warm / 66.1 best,
+acceptance steady at 82 %). Mode-matched dual-vs-single gains at the
+midpoints: prefill **+34 %** (2030/1511, serve harness), decode
+non-MTP **+35 %** (≈35/≈26), decode MTP **+16 %** (≈71/≈61, band
++4–21 %) — tensor-parallel splitting halves each host's weight
+traffic, which mostly benefits the bandwidth-bound non-speculative
+paths. MTP correctness was cross-checked with a prose prompt: 36.0
+tok/s at 48 % acceptance (single host), the expected
+acceptance-driven drop.
 
 Zero errors and zero link events across every run. Note: the headline
 decode figures require `--speculative mtp --mtp-model
