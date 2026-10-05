@@ -144,6 +144,26 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 17:20 STAGE 1 SHIPPED (fused peer-add combine, gufo @ 9addbac,
+  evidence/prefill-triage/ab-stage1/): SplitReduce.finish->acquire; paired
+  lane's combine folds the peer partial in registers (HcCombinePeerVec4Kernel,
+  bit-exact by construction; f16/q8+narrow fallback to plain add; MoE observer
+  gets summed row written back). Gates: operator test exact at 37/2048 tokens;
+  end-to-end member checksums + both-rank logit hashes IDENTICAL to baseline
+  binary. Interleaved 4x4 pair A/B @32k: candidate 2190-2221 vs base
+  1941-2174, wins 8/8 paired, median +1.9%, per-run sigma ~7 vs ~108 (variance
+  collapse; base's bad sessions disappear). Traffic saving modest: the 20MiB
+  block buffer is largely MALL-cache resident. Also corrected triage (docs/
+  prefill-scaling.md): down_e-exchange idea was WRONG (100MiB payload, window
+  overflow), excess %s double-counted MoeEpilogue, WaitValue 10.6ms was the
+  small-prompt/decode path not prefill; memory-copy trace: 1538x20MiB D2H
+  staging copies = 32.25GB @2.11GB/s during the 15.3s pass, 98.5% concurrent
+  with compute (~1-2% contention tax). Next (Stage 2): combine-kernel
+  efficiency (>=210MiB/boundary at ~168GB/s vs ~240 ceiling, ~800ms/rank
+  headroom, helps single AND dual), then replicated dense/W8A8/mix family
+  (~1.2s/rank, cost-model first — HC mixing is low-rank, capping exchange-
+  based splits). 3k needs kernel-level single-host work. Ops: /root/probe-base
+  + /root/probe-cand on both hosts for A/B; nix serve rebuild in flight.
 - 2026-10-05 16:10 PREFILL SCALING TRIAGE COMPLETE (docs/prefill-scaling.md,
   evidence/prefill-triage/): dual prefill is GPU-COMPUTE-bound, not
   link-bound (97.6% GPU busy at 32k; WaitValue 0.07%; exchanges fully

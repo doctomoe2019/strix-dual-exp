@@ -47,6 +47,47 @@ Notes:
   MTP catch-up is neutral on the dual side; serve vs probe harness
   differences are inside the variance band.
 
+## Corrections (2026-10-05, post-audit)
+
+Three errors in the original attribution, found while planning the first
+optimization:
+
+1. **The initially proposed `down_e` exchange is wrong.** `down_e` is
+   `[tokens × selected experts × hidden]` (~100 MiB at 2 048 tokens), not a
+   halved expert intermediate; exchanging it would multiply the MoE
+   boundary's wire bytes by five and overflow the 32 MiB windows. Dropped.
+2. **The excess percentages double-counted the MoE epilogue.** Its 546 ms
+   appeared both in the combine-family excess and in the TP2-only-kernels
+   bucket. The kernel-level table is correct; the percentage split was not.
+3. **The 10.6 ms `WaitValue` total is not the large-prefill wait budget.**
+   Those calls belong to the small second prompt and the decode phase; the
+   paired large exchanges wait host-side in `FinishPartial`. GPU-busy time
+   also cannot by itself separate arithmetic from memory stalls.
+
+A memory-copy trace of the same 32 k prefill quantifies the staging path:
+**1 538 D2H copies × 20 MiB = 32.25 GB over the 15.3 s pass (2.11 GB/s
+sustained), 98.5 % of copy time concurrent with compute** — a ~1–2 %
+fabric-contention tax on the kernels, real but small. The working diagnosis
+(Replicated GPU work + extra memory passes, link exonerated) stands.
+
+## Stage 1 result: fused peer-add combine (retained)
+
+`SplitReduce.finish` (add-the-peer) became `acquire` (return the peer
+pointer); the paired lane's combine folds the sum in registers
+(`HcCombinePeerVec4Kernel`, bit-exact by construction: same two-operand FP32
+sum and reduction order; f16/q8 wire and uncovered geometries fall back to
+the plain add; the MoE observer gets the summed row written back).
+
+- Operator check: bit-exact vs the unfused sequence at 37 and 2 048 tokens
+  (residual, F16/float norm, tiled Q8, summed row).
+- End-to-end: both-rank logit hashes and member checksums **identical to the
+  baseline binary** (17019078310904286155 / 13217550055185120708 @32 k).
+- Interleaved 4×4 pair A/B @32 k: candidate 2 190–2 221 tok/s vs baseline
+  1 941–2 174 — wins all 8 paired comparisons, median **+1.9 %**, and the
+  per-run spread collapses (σ ≈ 7 vs ≈ 108). The removed AddRows pass was
+  largely MALL-cache resident (20 MiB buffer vs 32 MiB cache), so the
+  traffic saving is modest; the variance reduction is the more visible win.
+
 ## Where the un-halved GPU time goes (rocprofv3, 32 768 tokens)
 
 Both runs are GPU-bound (single 98.9 % busy over 20.7 s kernel time, dual
@@ -94,22 +135,23 @@ Excess decomposition (per rank, at 32 k):
 
 ## Optimization ranking
 
-1. **Restore the fused MoE-epilogue-into-combine under TP2** by exchanging
-   the routed intermediates (`down_e`, halved expert width, F16) instead of
-   the final F32 MoE output. The epilogue is linear in the expert outputs
-   and both ranks hold identical routing weights, so the sum commutes —
-   but the rounding changes, so `--split` invariance and the quality gates
-   must be re-run. Expected: kill `MoeEpilogue` (546 ms), shrink
-   `AddRows` (631→~410 ms), and replace ~800 unfused Vec4 combines with
-   fused ones — roughly −1.5…−1.9 s/rank at 32 k, i.e. **dual prefill
-   ~2.3–2.4 k tok/s**.
-2. **Split the replicated dense/W8A8/mix family** (hyperconnection and
-   indexer projections): up to ~1.2 s/rank more → ~2.6 k tok/s. Larger
-   blast radius (numerical contracts per shape).
-3. Kernel-level prefill speedups help single and dual equally; they are the
-   only route to 3 k tok/s on this partition — the two fixes above alone
-   plateau near 2.6 k because ~35 % of the per-rank time is still replicated
-   or overhead work.
+1. **[Stage 1, DONE 2026-10-05: retained, see above — median +1.9 % and
+   variance collapse; the traffic saving was limited by MALL cache.]**
+   Fuse the peer add into the combine.
+2. **Combine-kernel efficiency** (helps single AND dual): the wide Vec4
+   combine moves ≥210 MiB/boundary at ~168 GB/s against a ~240 GB/s
+   measured ceiling — up to ~800 ms/rank headroom at 32 k. Needs dedicated
+   kernel work (occupancy/ISA); several broad variants are already rejected
+   in gufo's experiment history, so target the specific dispatch.
+3. **Split the replicated dense/W8A8/mix family** (hyperconnection and
+   indexer projections): up to ~1.2 s/rank more. Larger blast radius
+   (numerical contracts per shape); evaluate with the cost model first —
+   note the HC mixing has a low-rank factorization, which caps what any
+   exchange-based split can save.
+4. Kernel-level prefill speedups help single and dual equally; they are the
+   only route to 3 k tok/s on this partition — the fixes above alone
+   plateau well below it because ~35 % of the per-rank time is still
+   replicated or overhead work.
 
 Not worth pursuing for prefill: wire quantization (already measured +2–4 %
 ceiling), link latency (fully hidden), chunk-size tuning at depth (exchange
