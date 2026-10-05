@@ -59,26 +59,38 @@ cross-rank traffic on the stream transport, Qwen3.8-Flash-Next Q4:
 | Decode tg @ ~61–65k, mixed corpus | 32.6 | 62.6 ¹ | ~+92 % ¹ |
 | Decode tg @ ~61–65k, repetitive corpus | 46.1 | 62.6 ¹ | ~+36 % ¹ |
 
-**Current baseline (2026-10-05, after the wedge fix and the gufo rebase
-onto neuhaus `feat/tp2-rdma`; kernel "baseline-B", gufo `b7ee0a9`,
-GPUs forced high; `evidence/perf-baseline/`):**
+**Full progression, measured 2026-10-05** (post-wedge-fix stack: baseline-B
+kernel + rebased gufo `b7ee0a9`; one binary everywhere; cold prompt cache;
+~62 k-token prompts for prefill and a counting prompt for decode; GPUs
+forced high; `evidence/perf-baseline/`):
 
-| Measurement | Result | Historical reference |
+| Configuration | Prefill @ ~62 k depth (tok/s) | Decode, counting prompt (tok/s) |
 | --- | ---: | ---: |
-| Prefill, 8 k tokens ×2 members (probe) | **2212 tok/s** | 2164 |
-| Prefill, 61 k tokens single (probe) | **2149 tok/s** | 2104.6 (serve) |
-| Decode, MTP serve (counting, cold / warm) | **68.6 / 73.2 tok/s** | 61.6 |
-| Decode, non-MTP (sanity) | ~34 tok/s | 33.8 |
-| Exchange p50, 10 KiB (decode shape) | 27.1 µs | 26.9 µs |
-| Exchange p50, 5 MiB (prefill shape) | 1393 µs | 1296 µs |
+| Single host, non-MTP | 1511 | 24.3 |
+| Single host, MTP | 1540 | **66.1** (82 % draft accepted) |
+| Dual-host TP2, non-MTP | 2030 ¹ | 34.0–35.5 (serve) · 57.8 (probe, 2-member batch) |
+| Dual-host TP2, MTP | 2030 ¹ | **68.6 cold / 73.2 warm** |
+
+¹ Prefill rate is MTP-independent (speculation is decode-only); the
+single-host 1511→1540 spread is run-to-run variance. Dual prefill via
+gufo serve = 2030; the host-only probe harness measures 2149 at 61 k
+(no HTTP/scheduler in the path). Mode-matched dual-vs-single gains:
+prefill **+34 %** (2030/1511, serve harness), decode non-MTP **+40 %**
+(34.0/24.3), decode MTP **+4 % cold / +11 % warm** — tensor-parallel
+splitting halves each host's weight traffic, which mostly benefits the
+bandwidth-bound non-speculative paths; on this prompt MTP already
+delivers most of the decode speed a single host can reach.
 
 Zero errors and zero link events across every run. Note: the headline
 decode figures require `--speculative mtp --mtp-model
 mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; without MTP serve decodes at
-the ~34 tok/s non-speculative rate.
+the ~24 (single) / ~34 (dual) tok/s non-speculative rates.
 
 - Single-host best (depth 0) is 1628.5 pp / 59.2 tg-repetitive — the
   long-context rows above are where TP2 pulls far ahead.
+- The rows above are MTP-mode on gufo's bench corpora; mode-matched
+  single- and dual-host numbers including the non-MTP rates are in the
+  progression table below (same day, same binary).
 - The pair is also a capacity unlock: **Q8 at 262 144-token context**
   loads as TP2 shards in ~36 s and does not fit one 122 GB host at
   all.
