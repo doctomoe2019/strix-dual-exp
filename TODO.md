@@ -144,6 +144,33 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-05 11:50 SESSION MILESTONES (all on frozen baseline-B):
+  - **B0x10 serve-restart block: 9/10 clean, 0 link episodes** (run-
+    20261005-105857). The 1 failure was rank SKEW (rank0's 10th model
+    load ~68 s behind; rank1's 30 s deadline expired; rank0 then got
+    EPIPE instantly — clean failure semantics, no wedge). Fixed by
+    adopting the verbs transport's slow-peer deadlines (180 s exchange,
+    240 s GPU wait) in tbstream.
+  - **Stage 3.1 REBASE DONE**: feat/tp2-tbstream = origin/feat/tp2-rdma
+    (2833856) + 3 commits (transport+hardening, conflict-marker fix,
+    rank0-listens fix). Conflicts resolved: serve.cpp (upstream RoCE
+    device/port options + rdma_ready logging folded into our transport
+    switch + retry window), verbs.cpp (upstream RoCE selection kept),
+    TP2.md (union). Lesson: verify `grep '<<<<<<<'` after scripted
+    conflict resolution — one marker survived into a commit.
+  - **Stage 2.2 transport fixes shipped**: busy-poll poll() POLLERR
+    yield, EOF -> prompt kStreamClosed (2 s), reader-lifetime buffer
+    leak-instead-of-UAF, buffered-reader grow carries unread bytes,
+    slow-peer deadlines. Loop-mode + A7/A18/B0 x2 all clean on the
+    rebased binary (run-20261005-11xxxx).
+  - **Serve smoke END-TO-END OK**: rebased gufo (nix .#tp2-tbstream,
+    b7ee0a9) pair over tbstream on baseline-B: ranks paired first try,
+    chat completion answered, zero poison/timeouts. Binaries: /root/
+    newbin/gufo both hosts + cmake-build probes redeployed to hostB.
+  - Remaining: keepalive-notification bug fix (next kernel window);
+    Stage 4 deferred items; gufo-prod re-enable decision (criteria:
+    N clean serve restarts — evidence so far 9/10 with the one failure
+    explained+fixed); bench-grade numbers.
 - 2026-10-05 ~10:55 STAGE-1 DECISION GATE PASSED. Baseline-B (thunderbolt
   6F77780E, stream BB7FD35F, both hosts LOADED and verified):
   **A7 0/3 fail, 0/3 episodes; A18 0/3; A17 0/3; B0 0/3 — all clean**

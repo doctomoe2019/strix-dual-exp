@@ -1,8 +1,8 @@
 diff --git a/.devops/nix/package.nix b/.devops/nix/package.nix
-index 3c7b6d7..4b0ddf0 100644
+index 011d724..9aaab8c 100644
 --- a/.devops/nix/package.nix
 +++ b/.devops/nix/package.nix
-@@ -13,6 +13,7 @@
+@@ -14,6 +14,7 @@
    rocmPackages,
    rdma-core ? null,
    enableTp2Rdma ? false,
@@ -10,7 +10,7 @@ index 3c7b6d7..4b0ddf0 100644
    releaseVersion ? null,
    revision,
  }:
-@@ -85,7 +86,8 @@ stdenv.mkDerivation {
+@@ -87,7 +88,8 @@ stdenv.mkDerivation {
      "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
      "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
      "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
@@ -35,10 +35,10 @@ index cd2e2c3..7f464e4 100644
    mkServe = self.callPackage ./mk-serve.nix { };
  })
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 11baf4f..efe2e8f 100644
+index 6865bb0..6d83b9b 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -232,6 +232,9 @@ target_link_libraries(gufo PRIVATE
+@@ -242,6 +242,9 @@ target_link_libraries(gufo PRIVATE
  if (GUFO_ENABLE_TP2_RDMA)
    target_compile_definitions(gufo PRIVATE GUFO_ENABLE_TP2_RDMA=1)
  endif()
@@ -48,7 +48,7 @@ index 11baf4f..efe2e8f 100644
  target_compile_definitions(gufo PRIVATE
    GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
    GUFO_REVISION="${GUFO_REVISION}"
-@@ -278,6 +281,15 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
+@@ -288,6 +291,15 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
    target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
  endif()
  
@@ -105,10 +105,10 @@ index e817093..e34d1db 100644
  | `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
  | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index f895cc4..ae2b1b2 100644
+index 0b6a02b..57cb30f 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-@@ -106,3 +106,35 @@ Development measurements, not published cells.
+@@ -113,3 +113,35 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -145,20 +145,22 @@ index f895cc4..ae2b1b2 100644
 +| Multi-stream striping (blocked) | The configfs interface allows a second stream per peer (`stream/<router>.1/<name>`), and a second `/dev/tbstream1` appears on both hosts — but **no second DMA tunnel ever forms**: auto HopIDs stay `-1/-1` in both creation orders and manual values (9/9) are accepted without a path appearing (debugfs port path dump unchanged while writing). The first stream's tunnel works every time. Multi-stream on one cable is therefore blocked on the 7.2.6 driver — added to the upstream report list. Throughput scaling must come from kernel-side repost batching or a second cable. |
 +| Serving | Pending: the `gpu-tp2-tbstream` build and the two-host qualifying checklist on this pair. |
 diff --git a/docs/models/qwen3.8-flash-next/TP2.md b/docs/models/qwen3.8-flash-next/TP2.md
-index e43d0eb..bfad9fb 100644
+index 348be6e..e6e5e3f 100644
 --- a/docs/models/qwen3.8-flash-next/TP2.md
 +++ b/docs/models/qwen3.8-flash-next/TP2.md
-@@ -1,10 +1,13 @@
+@@ -1,11 +1,14 @@
  # Qwen3.8-Flash-Next TP=2
  
--Two-host tensor-parallel serving over InfiniBand RDMA. It serves Q4 and full
+-Two-host tensor-parallel serving over RDMA: native InfiniBand, RoCE v2, or USB4
+-cables as RoCE v2 devices ([below](#usb4)). It serves Q4 and full
 -Q8, AR and MTP, images, concurrent requests and history reuse. It needs
 -libibverbs and the build option `GUFO_ENABLE_TP2_RDMA` (off by default). Its
 -measurements are in [EXPERIMENTS.md](EXPERIMENTS.md#tp2), not in the published
 -one-host tables.
-+Two-host tensor-parallel serving over a point-to-point transport. Two are
-+built: native InfiniBand RDMA, and a USB4STREAM (`tbstream`) character
-+device over a direct USB4/Thunderbolt cable. Both serve Q4 and full
++Two-host tensor-parallel serving over a point-to-point transport. Three
++are built: native InfiniBand RDMA, RoCE v2 (including USB4 cables as RoCE
++v2 devices, [below](#usb4)), and a USB4STREAM (`tbstream`) character
++device over a direct USB4/Thunderbolt cable. All serve Q4 and full
 +Q8, AR and MTP, images, concurrent requests and history reuse. RDMA needs
 +libibverbs and the build option `GUFO_ENABLE_TP2_RDMA`; tbstream needs
 +Linux 7.2+ with a configured stream device and the build option
@@ -167,7 +169,7 @@ index e43d0eb..bfad9fb 100644
  
  ## Build
  
-@@ -15,6 +18,9 @@ nix develop --inputs-from .#tp2-rdma -c cmake --build --preset gpu-tp2 --target
+@@ -16,6 +19,9 @@ nix develop --inputs-from .#tp2-rdma -c cmake --build --preset gpu-tp2 --target
  # Release binary with TP2
  cmake --preset release -DGUFO_ENABLE_TP2_RDMA=ON
  cmake --build --preset release --parallel 4
@@ -177,9 +179,9 @@ index e43d0eb..bfad9fb 100644
  ```
  
  ## Run
-@@ -37,6 +43,21 @@ build/gpu-tp2/gufo serve llm --model "$MODEL" --speculative mtp --mtp-model "$MT
-   --tp-control-token SHARED_TOKEN --sessions 4
- ```
+@@ -45,6 +51,21 @@ GID. `--tp-gid-index` overrides that, and is needed when the port has several
+ candidates. Both ranks must use the same link layer. Each rank logs its choice as
+ `event=rdma_ready`. RoCE v2 is qualified over USB4 only.
  
 +`--tp-transport` picks the data transport, `rdma` (default) or `tbstream`;
 +both ranks must agree or the transport bootstrap refuses the pair. With
@@ -196,10 +198,20 @@ index e43d0eb..bfad9fb 100644
 +#   --tp-transport tbstream
 +```
 +
- Sampling, streaming, stop sequences, tool calls, images (`--mmproj` on both
- ranks), cancellation, `--request-timeout-ms`, history reuse and the disk cache
- (`--cache-disk` on both ranks, each on its own disk) work as on one host.
-@@ -84,6 +105,25 @@ batches a layer apart (one batch under 384 tokens), so each batch's exchange
+ ### USB4
+ 
+ Two Strix Halo hosts linked by USB4 cables can run TP2 without network cards:
+@@ -58,8 +79,7 @@ it reaches 44 Gbit/s one way. Load it with an IPv4 address on its
+ ```sh
+ sudo ip link add tbv0 type dummy
+ sudo ip addr add 10.77.0.1/24 dev tbv0 && sudo ip link set tbv0 up   # .2 on rank 1
+-sudo modprobe thunderbolt_ibverbs profile=linux_perf tbnet=prefer_rdma \
+-  lanes=2 register_verbs=1 roce_netdev=tbv0 native_write_striping=1
++sudo modprobe thunderbolt_ibverbs profile=linux_perf tbnet=prefer_rdma   lanes=2 register_verbs=1 roce_netdev=tbv0 native_write_striping=1
+ ibv_devices                        # usb4_rdma0 .. usb4_rdma3 with two cables
+ build/gpu-tp2/gufo serve llm ... --tp-rdma-device usb4_rdma0
+ ```
+@@ -124,6 +144,25 @@ batches a layer apart (one batch under 384 tokens), so each batch's exchange
  crosses the link while the other computes; the results equal two steps of
  those sizes bit for bit.
  
@@ -225,7 +237,7 @@ index e43d0eb..bfad9fb 100644
  **Rank 1 as executor.** Rank 0 runs the ordinary scheduler, runner pool and
  continuation cache through `TpMirroredRunner`. Just before each call that
  changes model state, it sends the call to rank 1 over an authenticated TCP
-@@ -137,17 +177,26 @@ request's states and snapshots are not reused.
+@@ -178,17 +217,26 @@ request's states and snapshots are not reused.
    rank 1 with a toy model, for every request kind, divergence and reuse rule.
  - `qwen38_flash_next.tp_partition` and the attention, projection and routed
    operator tests: the split against the full kernels.
@@ -261,7 +273,7 @@ index e43d0eb..bfad9fb 100644
  ## Qualifying a change
  
 diff --git a/flake.nix b/flake.nix
-index f8ceb0a..19c60c7 100644
+index 0ba555c..00a2b92 100644
 --- a/flake.nix
 +++ b/flake.nix
 @@ -129,6 +129,7 @@
@@ -284,10 +296,10 @@ index f8ceb0a..19c60c7 100644
        );
  
 diff --git a/src/cli/serve/serve.cpp b/src/cli/serve/serve.cpp
-index effbce6..4657e91 100644
+index e21cbbc..faf94a2 100644
 --- a/src/cli/serve/serve.cpp
 +++ b/src/cli/serve/serve.cpp
-@@ -45,6 +45,9 @@
+@@ -46,6 +46,9 @@
  #ifdef GUFO_ENABLE_TP2_RDMA
  #include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
  #endif
@@ -297,7 +309,7 @@ index effbce6..4657e91 100644
  #include "src/cli/serve/tts_service.hpp"
  #include "src/cli/serve/video_jobs.hpp"
  #include "src/cli/video/video.hpp"
-@@ -563,6 +566,8 @@ void PrintServeHelp(std::string_view program_name,
+@@ -620,6 +623,8 @@ void PrintServeHelp(std::string_view program_name,
      std::uint32_t tp_control_port = 18516;
      std::string tp_bootstrap_host;
      std::string tp_control_token;
@@ -306,10 +318,10 @@ index effbce6..4657e91 100644
      bool log_progress = false;
  
      gufo::cli::ArgParser parser(
-@@ -602,6 +607,12 @@ void PrintServeHelp(std::string_view program_name,
-                      &tp_device);
-     parser.AddOption("", "--tp-gid-index", "N", "InfiniBand GID index", "TP2",
-                      &tp_gid_index);
+@@ -666,6 +671,12 @@ void PrintServeHelp(std::string_view program_name,
+                      "RDMA GID index (default: 0 on InfiniBand, the port's "
+                      "RoCE v2 GID on RoCE)",
+                      "TP2", &tp_gid_index);
 +    parser.AddOption("", "--tp-transport", "rdma|tbstream",
 +                     "TP2 data transport (default: rdma)", "TP2",
 +                     &tp_transport);
@@ -319,7 +331,7 @@ index effbce6..4657e91 100644
  
      // Sampling Defaults
      parser.AddOption(
-@@ -1087,6 +1098,8 @@ int RunServe(std::span<const char* const> args) {
+@@ -1191,6 +1202,8 @@ int RunServe(std::span<const char* const> args) {
      std::uint32_t tp_control_port = 18516;
      std::string tp_bootstrap_host;
      std::string tp_control_token;
@@ -328,9 +340,9 @@ index effbce6..4657e91 100644
      bool log_progress = false;
  
      gufo::cli::ArgParser llm_parser(
-@@ -1126,6 +1139,13 @@ int RunServe(std::span<const char* const> args) {
-                          &tp_device);
-     llm_parser.AddOption("", "--tp-gid-index", "N", "InfiniBand GID index",
+@@ -1237,6 +1250,13 @@ int RunServe(std::span<const char* const> args) {
+                          "RDMA GID index (default: 0 on InfiniBand, the "
+                          "port's RoCE v2 GID on RoCE)",
                           "TP2", &tp_gid_index);
 +    llm_parser.AddOption("", "--tp-transport", "rdma|tbstream",
 +                         "TP2 data transport (default: rdma)", "TP2",
@@ -342,7 +354,7 @@ index effbce6..4657e91 100644
      llm_parser.AddOption(
          "-n", "--max-tokens", "N",
          "Default new-token limit (default: -1 = until EOS or context full)",
-@@ -1329,6 +1349,14 @@ int RunServe(std::span<const char* const> args) {
+@@ -1454,6 +1474,14 @@ int RunServe(std::span<const char* const> args) {
        std::cerr << "Error: invalid TP2 network/device options\n";
        return 2;
      }
@@ -357,7 +369,7 @@ index effbce6..4657e91 100644
      if (tp_world_size == 2 &&
          (tp_control_token.empty() || tp_control_token.size() > 4096)) {
        std::cerr << "Error: TP2 requires --tp-control-token\n";
-@@ -1355,38 +1383,137 @@ int RunServe(std::span<const char* const> args) {
+@@ -1480,45 +1508,104 @@ int RunServe(std::span<const char* const> args) {
        (void)::sigaction(SIGINT, &stop, nullptr);
      }
      if (tp_world_size == 2) {
@@ -396,7 +408,12 @@ index effbce6..4657e91 100644
 -          .bootstrap_host = tp_bootstrap_host,
 -          .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
 -          .device_index = tp_device,
--          .gid_index = tp_gid_index,
+-          .rdma_device = tp_rdma_device,
+-          .rdma_port = tp_rdma_port,
+-          .gid_index = tp_gid_index < 0
+-                           ? std::nullopt
+-                           : std::optional<std::uint32_t>(
+-                                 static_cast<std::uint32_t>(tp_gid_index)),
 +          const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
 +              .rank = tp_rank,
 +              .world_size = tp_world_size,
@@ -404,7 +421,13 @@ index effbce6..4657e91 100644
 +              .bootstrap_port =
 +                  static_cast<std::uint16_t>(tp_bootstrap_port),
 +              .device_index = tp_device,
-+              .gid_index = tp_gid_index,
++              .rdma_device = tp_rdma_device,
++              .rdma_port = tp_rdma_port,
++              .gid_index =
++                  tp_gid_index < 0
++                      ? std::nullopt
++                      : std::optional<std::uint32_t>(
++                            static_cast<std::uint32_t>(tp_gid_index)),
 +          };
 +          tp_communicator =
 +              models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
@@ -419,9 +442,16 @@ index effbce6..4657e91 100644
 +                    << " communicator not ready: " << tp_error << "\n";
 +          return false;
 +        }
-+        tp_control = server::TpControlChannel::Connect(
-+            tp_bootstrap_host,
-+            static_cast<std::uint16_t>(tp_control_port), &tp_error);
++        server::Logger::Info(
++            "tp", "event=rdma_ready " + tp_communicator->Describe());
++        tp_control = tp_rank == 0
++                         ? server::TpControlChannel::Listen(
++                               static_cast<std::uint16_t>(tp_control_port),
++                               &tp_error)
++                         : server::TpControlChannel::Connect(
++                               tp_bootstrap_host,
++                               static_cast<std::uint16_t>(tp_control_port),
++                               &tp_error);
 +        if (!tp_control) {
 +          tp_communicator.reset();
 +          std::cerr << "TP2 worker control channel not ready: " << tp_error
@@ -439,6 +469,8 @@ index effbce6..4657e91 100644
 -                  << '\n';
 -        return 1;
 -      }
+-      server::Logger::Info("tp",
+-                           "event=rdma_ready " + tp_communicator->Describe());
 -      tp_control =
 -          tp_rank == 0
 -              ? server::TpControlChannel::Listen(
@@ -449,7 +481,10 @@ index effbce6..4657e91 100644
 -      if (!tp_control) {
 -        std::cerr << "Error creating TP2 worker control channel: " << tp_error
 -                  << '\n';
--        return 1;
++      // Rank 1 can lose the race with the peer's startup or a link that
++      // is mid-heal (the kernel self-heal re-establishes the stream
++      // within ~10 s): retry the connection side for a bounded window
++      // before giving up. Rank 0 only listens and never needs this.
 +      if (tp_rank == 1) {
 +        const auto tp_retry_deadline =
 +            std::chrono::steady_clock::now() + std::chrono::seconds(25);
@@ -464,58 +499,8 @@ index effbce6..4657e91 100644
 +          }
 +          std::this_thread::sleep_for(std::chrono::seconds(2));
 +        }
-+      } else {
-+        std::string tp_error;
-+        if (tp_transport == "tbstream") {
-+#ifdef GUFO_ENABLE_TP2_TBSTREAM
-+          const models::qwen38_flash_next::rocm::TbstreamConfig
-+              tbstream_config{
-+                  .rank = tp_rank,
-+                  .world_size = tp_world_size,
-+                  .bootstrap_host = tp_bootstrap_host,
-+                  .bootstrap_port = static_cast<std::uint16_t>(
-+                      tp_bootstrap_port),
-+                  .device_index = tp_device,
-+                  .device_path = tp_tbstream_device,
-+              };
-+          tp_communicator =
-+              models::qwen38_flash_next::rocm::CreateTbstreamCommunicator(
-+                  tbstream_config, &tp_error);
-+#else
-+          std::cerr << "Error: this build has no TP2 tbstream support\n";
-+          return 2;
-+#endif
-+        } else {
-+#ifdef GUFO_ENABLE_TP2_RDMA
-+          const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
-+              .rank = tp_rank,
-+              .world_size = tp_world_size,
-+              .bootstrap_host = tp_bootstrap_host,
-+              .bootstrap_port =
-+                  static_cast<std::uint16_t>(tp_bootstrap_port),
-+              .device_index = tp_device,
-+              .gid_index = tp_gid_index,
-+          };
-+          tp_communicator =
-+              models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
-+                  rdma_config, &tp_error);
-+#else
-+          std::cerr << "Error: this build has no TP2 RDMA support\n";
-+          return 2;
-+#endif
-+        }
-+        if (!tp_communicator) {
-+          std::cerr << "Error creating the TP2 " << tp_transport
-+                    << " communicator: " << tp_error << '\n';
-+          return 1;
-+        }
-+        tp_control = server::TpControlChannel::Listen(
-+            static_cast<std::uint16_t>(tp_control_port), &tp_error);
-+        if (!tp_control) {
-+          std::cerr << "Error creating TP2 worker control channel: "
-+                    << tp_error << '\n';
-+          return 1;
-+        }
++      } else if (!attempt()) {
+         return 1;
        }
  #else
 -      std::cerr << "Error: this build has no TP2 RDMA support\n";
@@ -523,7 +508,7 @@ index effbce6..4657e91 100644
        return 2;
  #endif
      }
-@@ -1498,9 +1625,13 @@ int RunServe(std::span<const char* const> args) {
+@@ -1640,9 +1727,13 @@ int RunServe(std::span<const char* const> args) {
      return 1;
    }
    // Rank 0 of a TP2 pair whose peer or link is gone fails every request, so
@@ -539,7 +524,7 @@ index effbce6..4657e91 100644
    std::atomic<bool> serving{true};
    std::thread pair_watch;
    if (tp_rank_zero) {
-@@ -1512,10 +1643,15 @@ int RunServe(std::span<const char* const> args) {
+@@ -1654,10 +1745,15 @@ int RunServe(std::span<const char* const> args) {
            continue;
          }
          server::Logger::Error(
@@ -557,7 +542,7 @@ index effbce6..4657e91 100644
        }
      });
 diff --git a/src/models/qwen38_flash_next/CMakeLists.txt b/src/models/qwen38_flash_next/CMakeLists.txt
-index 495dd3f..0c8554a 100644
+index ed3c70f..d75895d 100644
 --- a/src/models/qwen38_flash_next/CMakeLists.txt
 +++ b/src/models/qwen38_flash_next/CMakeLists.txt
 @@ -2,6 +2,8 @@
@@ -569,7 +554,7 @@ index 495dd3f..0c8554a 100644
  
  add_library(gufo_qwen38_flash_next STATIC
    config.cpp
-@@ -32,6 +34,24 @@ if (GUFO_ENABLE_TP2_RDMA)
+@@ -33,6 +35,24 @@ if (GUFO_ENABLE_TP2_RDMA)
      GUFO_ENABLE_TP2_RDMA=1)
  endif()
  
@@ -595,7 +580,7 @@ index 495dd3f..0c8554a 100644
    cpu_ops.cpp reference.cpp)
  target_link_libraries(gufo_qwen38_flash_next_reference PUBLIC
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
-index 3f55af4..a29ac82 100644
+index 3347a1d..b724ea9 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
 @@ -9,6 +9,46 @@
@@ -645,7 +630,7 @@ index 3f55af4..a29ac82 100644
  /// Ordered communication boundary used by the model executor. A two-rank sum
  /// is one `ExchangePartial` followed by adding the returned peer partial to
  /// this rank's partial on the GPU. Each rank adds local plus peer, and float
-@@ -35,8 +75,10 @@ public:
+@@ -37,8 +77,10 @@ public:
    /// null on failure. Every exchange must use the same stream, and the add
    /// that reads the peer's partial must be queued on it before the second
    /// exchange after this one starts: that exchange reuses the buffer.
@@ -656,7 +641,7 @@ index 3f55af4..a29ac82 100644
                                                       hipStream_t stream,
                                                       std::string* error) = 0;
    /// The overlapped form of `ExchangePartial`, so the GPU computes other rows
-@@ -49,8 +91,10 @@ public:
+@@ -51,8 +93,10 @@ public:
    [[nodiscard]] virtual bool StartPartial(const float* data, std::size_t bytes,
                                            hipStream_t stream,
                                            std::string* error) = 0;
@@ -669,7 +654,7 @@ index 3f55af4..a29ac82 100644
  
    /// The GPU's half of a queued exchange (QueuePartial). Queue on the stream,
    /// in this order: copy the partial to `send` and then publish `value` in
-@@ -67,6 +111,9 @@ public:
+@@ -69,6 +113,9 @@ public:
      std::uint32_t* arrivals{nullptr};  ///< StagePartial's block counter
      std::uint32_t* timed_out{nullptr};
      std::uint64_t wait_ticks{0};
@@ -680,10 +665,10 @@ index 3f55af4..a29ac82 100644
    /// Queues an exchange of `bytes` without blocking the caller: a background
    /// thread sends this rank's partial once the stream publishes it and
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
-index e939746..2d34af2 100644
+index de09320..6ed7d72 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
-@@ -1564,14 +1564,46 @@ Executor::TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
+@@ -1576,14 +1576,46 @@ Executor::TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
      if (!communicator->QueuePartial(bytes, &queued, error)) {
        return false;
      }
@@ -734,7 +719,7 @@ index e939746..2d34af2 100644
      }
      return true;
    };
-@@ -1599,14 +1631,31 @@ Executor::SplitReduce Executor::TwoRankSplitReduce(
+@@ -1611,14 +1643,31 @@ Executor::SplitReduce Executor::TwoRankSplitReduce(
    reduce.finish = [communicator = std::move(communicator), hidden](
                        float* data, std::size_t bytes, hipStream_t stream,
                        std::string* error) {
@@ -770,10 +755,10 @@ index e939746..2d34af2 100644
      return true;
    };
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
-index d68388c..201e152 100644
+index 506db2c..5148983 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
-@@ -2574,6 +2574,33 @@ __global__ void AddRowsBroadcastKernel(const float* addend, float* residual,
+@@ -2582,6 +2582,33 @@ __global__ void AddRowsBroadcastKernel(const float* addend, float* residual,
    }
  }
  
@@ -807,7 +792,7 @@ index d68388c..201e152 100644
  // Every thread's copies reach the system scope before its block is counted;
  // the last block to finish publishes `value`, so the host that reads it also
  // sees the whole partial.
-@@ -2605,6 +2632,88 @@ __global__ void StagePartialKernel(const float* __restrict__ partial,
+@@ -2613,6 +2640,88 @@ __global__ void StagePartialKernel(const float* __restrict__ partial,
    }
  }
  
@@ -896,7 +881,7 @@ index d68388c..201e152 100644
  __global__ void WaitValueKernel(const std::uint64_t* flag, std::uint64_t value,
                                  std::uint64_t ticks, std::uint32_t* timed_out) {
    const std::uint64_t start = wall_clock64();
-@@ -5989,6 +6098,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
+@@ -6194,6 +6303,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
                       stream, addend, residual, hidden, streams);
  }
  
@@ -917,7 +902,7 @@ index d68388c..201e152 100644
  void StagePartial(const float* partial, float* send, std::size_t count,
                    std::uint32_t* arrivals, std::uint64_t* ready,
                    std::uint64_t value, hipStream_t stream) {
-@@ -5999,6 +6122,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+@@ -6204,6 +6327,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
                       stream, partial, send, count, arrivals, ready, value);
  }
  
@@ -948,10 +933,10 @@ index d68388c..201e152 100644
                 std::uint64_t ticks, std::uint32_t* timed_out,
                 hipStream_t stream) {
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
-index 077933d..86ce5c4 100644
+index 83f4b74..8f64916 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
-@@ -466,6 +466,17 @@ void AddRowsBroadcast(const float* addend, float* residual,
+@@ -477,6 +477,17 @@ void AddRowsBroadcast(const float* addend, float* residual,
                        std::uint32_t n_tokens, std::uint32_t hidden,
                        std::uint32_t streams, hipStream_t stream);
  
@@ -969,7 +954,7 @@ index 077933d..86ce5c4 100644
  /// Copies `count` floats of a partial into a host-visible send window, then
  /// publishes `value` in `ready` once every block's copy is visible to the
  /// host. `arrivals` counts finished blocks and must start at zero; the last
-@@ -474,6 +485,18 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+@@ -485,6 +496,18 @@ void StagePartial(const float* partial, float* send, std::size_t count,
                    std::uint32_t* arrivals, std::uint64_t* ready,
                    std::uint64_t value, hipStream_t stream);
  
@@ -990,10 +975,10 @@ index 077933d..86ce5c4 100644
  void WaitValue(const std::uint64_t* flag, std::uint64_t value,
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
 new file mode 100644
-index 0000000..675bdab
+index 0000000..a03dfb1
 --- /dev/null
 +++ b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
-@@ -0,0 +1,1678 @@
+@@ -0,0 +1,1722 @@
 +#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
 +
 +#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -1055,15 +1040,22 @@ index 0000000..675bdab
 +constexpr std::size_t kStartedExchanges = 4;
 +// Queued exchanges not yet complete; a forward queues one per layer.
 +constexpr std::size_t kQueuedExchanges = 4096;
-+// A GPU wait gives up well after the exchange thread's own timeout.
-+constexpr std::uint64_t kWaitSeconds = 120;
++// A GPU wait gives up well after the exchange thread's own timeout. The
++// 240 s budget mirrors the verbs transport's slow-peer tolerance: rank
++// skew from back-to-back model loads (observed ~68 s on the tenth
++// restart in a row) must not fail an exchange against a live peer.
++constexpr std::uint64_t kWaitSeconds = 240;
 +// Flag words, a cache line apart: written by the GPU, by the host, and by a
 +// GPU wait that timed out.
 +constexpr std::size_t kReadyOffset = 0;
 +constexpr std::size_t kArrivedOffset = 64;
 +constexpr std::size_t kTimedOutOffset = 128;
 +constexpr std::size_t kFlagBytes = 4096;
-+constexpr auto kCollectiveTimeout = std::chrono::seconds(30);
++// A slow-but-live peer (model-load skew, throttled storage) is waited
++// for, mirroring the verbs transport's 180 s exchange deadline; a dead
++// peer is detected at once through the bootstrap socket or the stream's
++// EOF/EPIPE, not by this deadline.
++constexpr auto kCollectiveTimeout = std::chrono::seconds(180);
 +constexpr auto kReceiveSpinWindow = std::chrono::microseconds(500);
 +// An exchange waits for a layer of GPU work, or a peer that is a layer behind:
 +// spinning that long keeps the wake-up latency off every decode exchange.
@@ -1987,6 +1979,12 @@ index 0000000..675bdab
 +          SetError(error, "tbstream peer closed the bootstrap connection");
 +          return false;
 +        }
++        // busy_poll streams always report POLLERR from poll(2) (there
++        // are no interrupt wakeups), so poll returns immediately: yield
++        // instead of spinning the core while the peer's ring drains.
++        if (fds[0].revents & POLLERR) {
++          ::usleep(100);
++        }
 +        if (std::chrono::steady_clock::now() >= deadline) {
 +          SetError(error, "tbstream write timed out");
 +          return false;
@@ -2296,7 +2294,16 @@ index 0000000..675bdab
 +    // detached and its descriptor is never closed).
 +    const auto spin_deadline =
 +        std::chrono::steady_clock::now() + kExchangeSpinWindow;
++    // A stream that reports EOF (the peer's CLOSE was consumed) stays at
++    // zero forever: fail the exchange promptly instead of spinning until
++    // the waiters' collective timeout. Repeated zero reads past the spin
++    // window mean exactly that on a healthy stream.
++    const auto eof_deadline =
++        std::chrono::steady_clock::now() + std::chrono::seconds(2);
 +    while (received < frame_bytes) {
++      if (stopping_.load(std::memory_order_relaxed)) {
++        return false;
++      }
 +      const ssize_t n =
 +          ::read(read_fd_, window + received, frame_bytes - received);
 +      if (n > 0) {
@@ -2312,8 +2319,12 @@ index 0000000..675bdab
 +      if (n == 0) {
 +        if (std::chrono::steady_clock::now() < spin_deadline) {
 +          CpuRelax();
-+        } else {
++        } else if (std::chrono::steady_clock::now() < eof_deadline) {
 +          ::usleep(100);
++        } else {
++          failure = reinterpret_cast<void*>(
++              static_cast<std::uintptr_t>(ReaderFailure::kStreamClosed));
++          break;
 +        }
 +        continue;
 +      }
@@ -2361,14 +2372,24 @@ index 0000000..675bdab
 +    void* failure = nullptr;
 +    const auto spin_deadline =
 +        std::chrono::steady_clock::now() + kExchangeSpinWindow;
++    // See ReadFrame: sustained zero reads mean the peer's CLOSE was
++    // consumed — fail promptly instead of spinning to the timeout.
++    const auto eof_deadline =
++        std::chrono::steady_clock::now() + std::chrono::seconds(2);
 +    const std::size_t want_cap =
 +        std::max<std::size_t>(kCoalesceBytes * 2, frame_bytes + kCoalesceBytes);
 +    if (rx_cap_ < want_cap) {
-+      // Grow once; the buffer is zero-filled only on allocation, never
-+      // per read.
-+      rx_buf_ = std::make_unique<std::uint8_t[]>(want_cap);
++      // Grow, CARRYING the unconsumed remainder: unread buffered bytes
++      // belong to the byte stream and must survive the reallocation.
++      std::unique_ptr<std::uint8_t[]> grown =
++          std::make_unique<std::uint8_t[]>(want_cap);
++      const std::size_t unread = rx_have_ - rx_parsed_;
++      if (unread > 0) {
++        std::memmove(grown.get(), rx_buf_.get() + rx_parsed_, unread);
++      }
++      rx_buf_ = std::move(grown);
 +      rx_cap_ = want_cap;
-+      rx_have_ = 0;
++      rx_have_ = unread;
 +      rx_parsed_ = 0;
 +    }
 +    while (rx_have_ - rx_parsed_ < frame_bytes) {
@@ -2393,8 +2414,12 @@ index 0000000..675bdab
 +      if (n == 0) {
 +        if (std::chrono::steady_clock::now() < spin_deadline) {
 +          CpuRelax();
-+        } else {
++        } else if (std::chrono::steady_clock::now() < eof_deadline) {
 +          ::usleep(100);
++        } else {
++          failure = reinterpret_cast<void*>(
++              static_cast<std::uintptr_t>(ReaderFailure::kStreamClosed));
++          break;
 +        }
 +        continue;
 +      }
@@ -2575,7 +2600,11 @@ index 0000000..675bdab
 +      (void)hipFree(arrivals_);
 +      arrivals_ = nullptr;
 +    }
-+    if (flags_ != nullptr) {
++    // A reader parked in read(2) that could not be joined may still wake
++    // (late peer data) and write into these buffers: leaking them to
++    // process exit is the safe lifetime; read_fd_ stays open for it too.
++    const bool reader_may_live = reader_started_ && !reader_joined_;
++    if (flags_ != nullptr && !reader_may_live) {
 +      (void)hipHostFree(flags_);
 +      flags_ = nullptr;
 +    }
@@ -2584,7 +2613,7 @@ index 0000000..675bdab
 +      (void)hipHostFree(send_buffer_);
 +      send_buffer_ = nullptr;
 +    }
-+    if (recv_buffer_ != nullptr) {
++    if (recv_buffer_ != nullptr && !reader_may_live) {
 +      (void)hipHostFree(recv_buffer_);
 +      recv_buffer_ = nullptr;
 +    }
@@ -2718,29 +2747,10 @@ index 0000000..855dada
 +
 +#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_TBSTREAM_HPP_
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp b/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
-index 688245c..4e87969 100644
+index 386bae7..a7360df 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
-@@ -423,7 +423,8 @@ public:
-     ibv_port_attr port{};
-     if (ibv_query_port(context_, kPort, &port) != 0 ||
-         port.state != IBV_PORT_ACTIVE ||
--        port.link_layer != IBV_LINK_LAYER_INFINIBAND) {
-+        (port.link_layer != IBV_LINK_LAYER_INFINIBAND &&
-+         port.link_layer != IBV_LINK_LAYER_ETHERNET)) {
-       SetError(error, "native InfiniBand port 1 is not active");
-       return false;
-     }
-@@ -539,7 +540,7 @@ public:
-         remote.world_size != config_.world_size ||
-         remote.rank != 1U - config_.rank || remote.qp_num == 0 ||
-         remote.port_num != kPort ||
--        remote.link_layer != IBV_LINK_LAYER_INFINIBAND ||
-+        remote.link_layer != port.link_layer ||
-         remote.mtu < IBV_MTU_256 || remote.mtu > IBV_MTU_4096 ||
-         remote.recv_address != kRecvAddress || remote.recv_rkey == 0) {
-       SetError(error, "verbs bootstrap metadata is invalid");
-@@ -661,6 +662,7 @@ public:
+@@ -688,6 +688,7 @@ public:
  
    [[nodiscard]] const float* ExchangePartial(const float* data,
                                               std::size_t bytes,
@@ -2748,7 +2758,7 @@ index 688245c..4e87969 100644
                                               hipStream_t stream,
                                               std::string* error) override {
      std::lock_guard lock(mutex_);
-@@ -688,6 +690,9 @@ public:
+@@ -715,6 +716,9 @@ public:
        return nullptr;
      }
      ++next_operation_;
@@ -2758,7 +2768,7 @@ index 688245c..4e87969 100644
      return peer;
    }
  
-@@ -729,6 +734,7 @@ public:
+@@ -756,6 +760,7 @@ public:
    }
  
    [[nodiscard]] const float* FinishPartial(std::size_t bytes,
@@ -2766,7 +2776,7 @@ index 688245c..4e87969 100644
                                             std::string* error) override {
      {
        std::lock_guard lock(mutex_);
-@@ -752,6 +758,10 @@ public:
+@@ -779,6 +784,10 @@ public:
      }
      if (finished.peer == nullptr) {
        Poison(error, finished.error);
@@ -2778,10 +2788,10 @@ index 688245c..4e87969 100644
      return finished.peer;
    }
 diff --git a/tests/models/qwen38_flash_next/CMakeLists.txt b/tests/models/qwen38_flash_next/CMakeLists.txt
-index ec3eaf2..4bd13fa 100644
+index 6ee40b2..2609257 100644
 --- a/tests/models/qwen38_flash_next/CMakeLists.txt
 +++ b/tests/models/qwen38_flash_next/CMakeLists.txt
-@@ -49,9 +49,9 @@ if (ENGINE_ENABLE_HIP)
+@@ -50,9 +50,9 @@ if (ENGINE_ENABLE_HIP)
    target_link_libraries(qwen38_flash_next_tp_probe PRIVATE
      gufo_qwen38_flash_next hip::host)
  
@@ -3224,13 +3234,15 @@ index 8dfc5cb..6d139be 100644
    }
  #endif
 diff --git a/tools/README.md b/tools/README.md
-index 588ef90..afc3c36 100644
+index 9ca75aa..0bec87b 100644
 --- a/tools/README.md
 +++ b/tools/README.md
-@@ -11,6 +11,7 @@ benchmark/tuning executables; Python tools run from this source tree.
+@@ -10,7 +10,8 @@ benchmark/tuning executables; Python tools run from this source tree.
+ | --- | --- |
  | `bench/` | Kernel microbenchmarks, hipBLASLt tuning, and direct speculative-corpus checks; `model-bench.py` drives per-model BENCHMARKS.md tables against each model's reference |
  | `prof/` | rocprofv3 capture, stage summaries, and ISA inspection |
- | `serving/` | HTTP benchmarks, interrupted-chat/disk replay and official OpenAI SDK checks |
+-| `serving/` | HTTP serving benchmarks |
++| `serving/` | HTTP benchmarks, interrupted-chat/disk replay and official OpenAI SDK checks |
 +| `tbstream/` | USB4STREAM link qualification for the TP=2 tbstream transport: kernel/stream setup and the host-only `tbstream_probe` microbenchmark |
  | `ds4/` | DeepSeek-specific validation and experiments |
  | `qwen27b/` | Qwen27B/DFlash2 kernels, reference checks, and vision validation |
