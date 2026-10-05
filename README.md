@@ -64,12 +64,22 @@ kernel + rebased gufo `b7ee0a9`; one binary everywhere; cold prompt cache;
 ~62 k-token prompts for prefill and a counting prompt for decode; GPUs
 forced high; `evidence/perf-baseline/`):
 
-| Configuration | Prefill @ ~62 k depth (tok/s) | Decode, counting prompt (tok/s) |
-| --- | ---: | ---: |
-| Single host, non-MTP | 1511 | 24.3–27.2 ² |
-| Single host, MTP | 1540 | **56.6–66.1** (82 % draft accepted) ² |
-| Dual-host TP2, non-MTP | 2030 ¹ | 34.0–35.5 (serve) · 57.8 (probe, 2-member batch) |
-| Dual-host TP2, MTP | 2030 ¹ | **68.6 cold / 73.2 warm** |
+| Configuration | Prefill @ ~62 k depth (tok/s) | Decode, counting (tok/s) | Decode, coding (tok/s) |
+| --- | ---: | ---: | ---: |
+| Single host, non-MTP | 1511 | 24.3–27.2 ² | prompt-insensitive ³ |
+| Single host, MTP | 1540 | **56.6–66.1** (82 % accepted) ² | **44.9–54.6** (64–77 % accepted) |
+| Dual-host TP2, non-MTP | 2030 ¹ | 34.0–35.5 (serve) · 57.8 (probe, 2-member batch) | prompt-insensitive ³ |
+| Dual-host TP2, MTP | 2030 ¹ | **68.6 cold / 73.2 warm** | **50.5–66.9** (52–75 % accepted) |
+
+The coding prompt (a binary-search function in Python) sits between
+counting and prose, as intended — and it widens the dual-vs-single MTP
+gap: +13 % worst-pairing to +42 % cold-vs-cold (63.9/44.9), versus
++4–21 % on counting. Speculation hides the compute advantage on
+near-deterministic text; code leaves enough per-token compute for the
+halved per-host weights to matter. Acceptance itself varies per run
+even under greedy sampling because gufo adapts the MTP draft depth from
+cycle timings (observed 133–196 accepted of 256 on the identical
+prompt).
 
 ¹ Prefill rate is MTP-independent (speculation is decode-only); the
 single-host 1511→1540 spread is run-to-run variance. Dual prefill via
@@ -88,6 +98,10 @@ traffic, which mostly benefits the bandwidth-bound non-speculative
 paths. MTP correctness was cross-checked with a prose prompt: 36.0
 tok/s at 48 % acceptance (single host), the expected
 acceptance-driven drop.
+
+³ Non-speculative decode has no acceptance dependence — the token
+rate is pure forward time, so the counting-prompt figures hold for
+any prompt class.
 
 Zero errors and zero link events across every run. Note: the headline
 decode figures require `--speculative mtp --mtp-model
