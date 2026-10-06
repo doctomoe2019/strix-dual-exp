@@ -55,21 +55,31 @@ cross-rank traffic on the stream transport, Qwen3.8-Flash-Next Q4:
 
 | Throughput (tok/s) | Single host | Dual-host TP2 | Gain |
 | --- | ---: | ---: | ---: |
+| Prefill pp @32k depth | 1421.9 | **2329–2332** ⁴ | **+64 %** ⁴ |
 | Prefill pp @ ~61–65k depth | 1316.7 | **2104.6 – 2195.5** | **+60 – 67 %** |
 | Decode tg @ ~61–65k, mixed corpus | 32.6 | 62.6 ¹ | ~+92 % ¹ |
 | Decode tg @ ~61–65k, repetitive corpus | 46.1 | 62.6 ¹ | ~+36 % ¹ |
 
-**Full progression, measured 2026-10-05** (post-wedge-fix stack: baseline-B
-kernel + rebased gufo `b7ee0a9`; one binary everywhere; cold prompt cache;
+⁴ Post-HCF1 (2026-10-06): the F16-norm combine now also emits the next
+mixer's inject partials, so the mixer's separate inject pass disappears —
+canary-gated paired-probe A/B @32k moved 2269 → 2329 tok/s median
+(**+2.65 %**, 4/4 clean sessions, full separation; single-host cells
+untouched above are the published one-host measurements). Decode ms/step
+was flat across the A/B (35.3–36.0 both arms), so every decode figure
+below is unchanged. The ~62k serve harness was not remeasured.
+
+**Full progression, measured 2026-10-05; TP2 prefill refreshed
+2026-10-06 (HCF1)** (post-wedge-fix stack: baseline-B kernel + rebased
+gufo; one binary everywhere; cold prompt cache;
 ~62 k-token prompts for prefill and a counting prompt for decode; GPUs
-forced high; `evidence/perf-baseline/`):
+forced high; `evidence/perf-baseline/` and `evidence/prefill-triage/hcf1/`):
 
 | Configuration | Prefill @ ~62 k depth (tok/s) | Decode, counting (tok/s) | Decode, coding (tok/s) |
 | --- | ---: | ---: | ---: |
 | Single host, non-MTP | 1511 | 24.3–27.2 ² | prompt-insensitive ³ |
 | Single host, MTP | 1540 | **56.6–66.1** (82 % accepted) ² | **44.9–54.6** (64–77 % accepted) |
-| Dual-host TP2, non-MTP | 2030 ¹ | 34.0–35.5 (serve) · 57.8 (probe, 2-member batch) | prompt-insensitive ³ |
-| Dual-host TP2, MTP | 2030 ¹ | **68.6 cold / 73.2 warm** | **50.5–66.9** (52–75 % accepted) |
+| Dual-host TP2, non-MTP | **2330** ⁴ (was 2030 serve / 2149 probe ¹) | 34.0–35.5 (serve) · 57.8 (probe, 2-member batch) | prompt-insensitive ³ |
+| Dual-host TP2, MTP | **2330** ⁴ (was 2030 serve / 2149 probe ¹) | **68.6 cold / 73.2 warm** (unchanged ⁴) | **50.5–66.9** (52–75 % accepted) (unchanged ⁴) |
 
 The coding prompt (a binary-search function in Python) sits between
 counting and prose, as intended — and it widens the dual-vs-single MTP
@@ -147,7 +157,9 @@ where stream teardown desyncs one host's NHI control plane until reboot
 ## Ongoing work
 
 - **Prefill scaling** (see [docs/prefill-scaling.md](docs/prefill-scaling.md)):
-  the dual-host 2.0–2.2 k tok/s ceiling is triaged — GPU compute that TP2
+  the dual-host ceiling moved from 2.0–2.2 k to **~2.33 k tok/s** with the
+  HC inject-into-combine fusion (HCF1, 2026-10-06, +2.65 % paired @32k);
+  the remaining gap to ideal scaling is triaged — GPU compute that TP2
   does not halve (lost MoE-epilogue fusion, exchange-boundary overhead
   kernels, replicated hyperconnection/indexer projections), not the USB4
   link, which sits 97 %+ hidden behind compute. Ranked fixes and their
@@ -182,8 +194,10 @@ where stream teardown desyncs one host's NHI control plane until reboot
   3. stream HopID rotation plus a teardown-order fix mirroring the
      upstream CVE-2026-74691 thunderbolt-net fix.
 - `gufo/` — the user-space side as one WIP patch against gufo's
-  `feat/tp2-tbstream` branch (`git diff HEAD`, sanitized): the stream
-  transport, the TP2 probe tooling, and graceful-exit hardening.
+  `feat/tp2-tbstream` branch (diff vs the `feat/tp2-rdma` base, sanitized):
+  the stream transport, the TP2 probe tooling, graceful-exit hardening,
+  and the retained prefill optimizations (fused peer combine, TP2 launch
+  plans, GDN row-split, HC inject emission into the combine).
 - `scripts/` — day-2 operations: link bring-up, pair qualification and
   storm validation, forensics capture, and the `tbstream-heal@`
   last-mile healer (systemd unit included).
@@ -223,7 +237,7 @@ This project stands on a great deal of upstream work:
   builds directly on his upstream TP2 work: the
   rank-1-without-scheduler startup, the TP2 pair collectives error
   propagation, and the TP control-byte refactors. `gufo/` here is a
-  patch against that branch, regenerable with `git diff HEAD`.
+  patch against that branch, regenerated from the committed tree.
 - Vanilla **Linux 7.3-rc3** is the base kernel; `kernel/patches/`
   expresses our entire divergence from it.
 
