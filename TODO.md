@@ -144,6 +144,59 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~10:15 HCF1 RETAINED: HC inject partials fused into the F16
+  combine (gufo worktree uncommitted on 7d6379f; serve binary 31127d4c does
+  NOT contain it — deploy decision pending; prod still down). The plain and
+  peer F16-norm combines emit the next mixer's inject partials from the
+  norm they write (LDS-staged row — aliased over the peer kernel's dead
+  s_row stage — replayed with the inject pass's exact grouping/loads/
+  reduction -> byte-identical partials; separate sibling kernels keep the
+  non-emitting codegen untouched). Two build lessons encoded: (1) mirroring
+  the reference's SOURCE SHAPE (staged wq register array -> v loads ->
+  s-major adds) was required for bit-exact dots — a differently-shaped loop
+  with identical arithmetic reassociates under -ffast-math; (2) the
+  MoE-fused combine's norm compiles to v_fma_mixlo/hi_f16 (mul chain fused
+  with F16 rounding) so NO source-level replay can match it — variant
+  closed after two pinned orderings failed. Gates: hc_mix_ops_test exact
+  (37/2048, plain+peer, aliased buffers); single-host dump MD5 identical;
+  canonical member checksums every session; route-fires verified via
+  profiled kernel counts (inject pass 376->184 @8k single-host; emitting
+  combine +1.7%/call -> net ~+0.8% single-host, in session noise). PAIRED
+  TP2 A/B (canary-gated interleaved, 4 discards): @32k A 2261.9-2290.8
+  (median 2269.1) vs B 2321.6-2332.1 (median 2329.3) = +2.65%, 4/4 FULL
+  SEPARATION; @8k +2.3% 2/2; decode flat. Final-binary pair smoke 2330.6
+  tok/s canonical. gpu_probe sqrtf shim RE-ADDED (diagnostic target only;
+  Nix libm needs GLIBC_2.43). Evidence: evidence/prefill-triage/hcf1/
+  (SUMMARY.md + all pair logs). Probe inventory: probe-g1 (A, =7d6379f),
+  probe-hcf1 (B, =worktree, both hosts). NEXT by ledger: short-K HC up/down
+  epilogue efficiency screen (HC up = DenseF16GEMM<256,128,1,4,2,8,true>
+  835ms/rank + mixer-down W8A8 662ms/rank @32k), or extend HcCombineMoeF16
+  only via a kernel redesign (mixed-fma norm blocks source mirroring).
+- 2026-10-06 ~08:45 KV1 KV-CACHE QUANTIZATION CLOSED (user decision:
+  performance-inconclusive, not worth pursuing; evidence/kv1-drift/).
+  Drift pilot: every 1-byte KV format (int8 + F16 scale per 32/16/8
+  block, per-element E4M3; V-only and K+V; draft cache untouched) drifts
+  8-22% top-1 flips / mean KL 4e-3..5e-2 across synthetic+real 16k-38k
+  histories (428 teacher-forced full-vocab rows each; arm A bit-identical
+  to the unmodified tree; flips occur even at reference margins >0.7).
+  TP2's accepted reduction noise is 98.4% top-1 / KL 0.0055, so no format
+  qualifies as a default. Speed: writer overhead ~0 (32k single-host
+  prefill medians A/v8/e4m3 = 1557/1550/1558 tok/s, n=6 interleaved);
+  reader ceiling from attn_bench (sparse WMMA largely DRAM-bound:
+  8.80ms @32k vs 3.36ms dense with only 1.65x the keys) is ~+3-4%
+  prefill absolute best case, ~+1-2% realistic after in-reader dequant,
+  decode <=0.75% -> a repeatable speedup gate is unreachable. Pilot code
+  (GUFO_QFN_KV_PILOT kernels/plumbing + gpu_probe sqrtf shim) REVERTED;
+  rebuilt gpu_probe md5 == probe-g1 reference (a9bf4547). Profiling note
+  for the next campaign: the ledger's ~838ms "router/indexer dense"
+  family is actually the fused HC UP projection (DenseF16GEMM
+  <256,128,1,4,2,8,true> grid 40x4096, 1504 calls @32k) — with HC combine
+  (peer 2481ms), mixer down W8A8 (662ms), mix epilogue F16 (386ms
+  inject-only pass) and up (835ms), the HC chain is ~4.4s/rank of the
+  14.4s pass. NEXT: HCF1 — fuse the next mixer's HC inject partials into
+  the combine kernel that writes the F16/Q8 norm (removes the separate
+  HcMixEpilogueF16<false> pass, ~386ms/rank ~= 2.7% ceiling, helps single
+  AND dual); then short-K HC up/down epilogue efficiency screen.
 - 2026-10-06 00:50 S1 IMPLEMENTED + REJECTED, tree back to f61f17a (docs
   7d6379f). The mixer-down N-split was built end-to-end and proven BIT-EXACT
   twice (operator: HcDownHalfGemm F32-out + SiluScale + HcLoAssemble

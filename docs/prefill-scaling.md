@@ -229,12 +229,23 @@ Excess decomposition (per rank, at 32 k):
    GPU-stages small mid-part frames (queued path for the pair loop's
    boundary exchanges, or a second staging channel).
 10. Kernel-level prefill speedups help single and dual equally; with the
-    exchange-based routes exhausted, they are the only route to 3 k tok/s
-    on this partition.
+   exchange-based routes exhausted, they are the only route to 3k tok/s
+   on this partition.
+11. **[HC inject-into-combine fusion (HCF1), DONE 2026-10-06: retained,
+    +2.65% median @32k.]** The F16-norm combine's plain and peer routes now
+    emit the next mixer's inject partials from the norm values they already
+    hold (LDS-staged norm, the separate pass's exact grouping/reduction —
+    byte-identical partials; `HcMix` skips its inject pass). 4/4 clean
+    canary-gated pairs, full separation (2 269→2 329 tok/s), 8k +2.3%,
+    decode flat, checksums canonical. The MoE-fused combine's variant is
+    NOT bit-exactible (its norm compiles to v_fma_mix*_f16; closed).
+    Evidence: `evidence/prefill-triage/hcf1/`.
 
-Steady-state reference @32 k after G1: ≈ 2 285 tok/s non-MTP (clean-mode
-sessions 2 262–2 291). Cumulative retained since the triage: ≈ +3 % over
-the Stage-1b build.
+Steady-state reference @32k after HCF1: ≈ 2 330 tok/s (canary-clean
+sessions of 2026-10-06; the same session's baseline arm measured ≈ 2 270,
+the historical reference ≈ 2 285 — absolute levels drift by session, the
+paired deltas are the decision basis). Cumulative retained since the
+triage: ≈ +5.5% over the Stage-1b build.
 
 Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),

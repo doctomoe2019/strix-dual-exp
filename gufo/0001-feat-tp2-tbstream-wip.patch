@@ -84,6 +84,28 @@ index 36721bb..17a6d8c 100644
      }
    ],
    "buildPresets": [
+diff --git a/README.md b/README.md
+index 0888c0a..62d884a 100644
+--- a/README.md
++++ b/README.md
+@@ -36,11 +36,12 @@ C1 workload. Audio excludes loading.
+ Each model guide lists the required files and complete benchmark settings.
+ 
+ **Two hosts.** Qwen3.8 Flash-Next can also run across two Strix Halo hosts
+-connected by InfiniBand, RoCE v2 or USB4 cables, with tensor parallelism over
+-RDMA (TP2): faster
+-decode and prefill than one host, and room for checkpoints that do not fit one.
+-It is the only model with multi-host support so far and needs an optional build
+-with libibverbs (`-DGUFO_ENABLE_TP2_RDMA=ON`); see
++connected by InfiniBand, RoCE v2 or USB4 cables, with tensor parallelism (TP2):
++faster decode and prefill than one host, and room for checkpoints that do not
++fit one. It is the only model with multi-host support so far and needs an
++optional build: libibverbs RDMA (`-DGUFO_ENABLE_TP2_RDMA=ON`) or the
++USB4STREAM character device over a direct USB4/Thunderbolt cable
++(`-DGUFO_ENABLE_TP2_TBSTREAM=ON`, Linux 7.2+); see
+ [TP2](docs/models/qwen3.8-flash-next/TP2.md).
+ 
+ ## Philosophy
 diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
 index e817093..e34d1db 100644
 --- a/docs/DEVELOPMENT.md
@@ -105,10 +127,29 @@ index e817093..e34d1db 100644
  | `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
  | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..57cb30f 100644
+index 0b6a02b..e61bcd4 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-@@ -113,3 +113,35 @@ Development measurements, not published cells.
+@@ -46,6 +46,9 @@
+ | Batched MTP catch-up tail | Retained; after writing every attention cache row, compact final request rows into existing scratch and skip unused output projections/FFNs. Preserve the scalar arithmetic of one-row tails; full-head candidates and recursive carry match independent execution. |
+ | Routed Q8 accumulation order | Retained; explicit rounded product/FMA prevents identical rows changing with column placement. Independent FP64 dot and predictor carry checks pass. |
+ | Isolated MMQ quantizer rounding change | Deferred: it changes half-integer tie behavior shared with W8A8 and fails their existing agreement gate. No quantizer change retained. |
++| Fused peer-add combine (TP2 paired prefill) | Retained. The paired lane's peer partial is acquired without adding and folded into the combine that consumes the local partial (`HcCombinePeerVec4Kernel`), replacing the separate `AddRowsBroadcast` pass; the summed row is written back only for the MoE observer, and an aliasing summed row (`block_summed == block_local`) is refused so the observer route keeps the separate add (without that guard the diagnostic path corrupted results: every MoE hash and a member checksum changed). Bit-exact against the unfused sequence (operator check at 37/2048 tokens; end-to-end member checksums and both-rank logit hashes unchanged). Kernel time: the 631 ms `AddRowsBroadcast` family disappears and the fused kernel runs 2 605 ms against the unfused pair's 2 826 ms at 32 k (~220 ms/rank). End-to-end: the paired probe's timed prefill was each process's first (±5 % cold noise), which produced unresolvable A/Bs; after adding an untimed warmup prefill (±0.7 % A/A), steady state is a median **+0.9 %** over a no-fusion twin — retained for the exact fused path and the removed pass, not a headline gain. |
++| Fixed-geometry (hidden 2,560) Vec4 combine specialization | Rejected: templating the hidden width constant-folds the stream/element index math (the ISA mix showed 41 % integer/select instructions) with the FP sequence bit-exact, but the fused peer kernel moved only −1.4 % per call (1 690 vs 1 714 µs in matched slow-mode profiles; expert-GEMM controls ±1–2 %) and end-to-end stayed within noise (2/3 pairs ≤ +1 %, single host even). The combine is latency/bandwidth-bound, not issue-bound. |
++| K/V-only draft catch-up in paired prefill | Retained. `ForwardPair`'s known-hidden catch-up forwards take the `kv_only` path the unpaired prefill already uses (persistent draft KV/indexer only; the next full forward rebuilds the predictor residual from kept trunk rows). Paired MTP prefill: median **+2.1 %** (four interleaved canary-gated pairs, +3.0/+1.2 % at 8 k, +1.5/+2.9 % at 32 k). Gates: paired `tp_probe --split` logits bit-identical; member tokens/checksums equal to the pre-change binary and to the greedy AR decode on both ranks; the chunk seam (4 104-token prompt) covered. |
+ | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
+ | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
+ | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
+@@ -65,6 +68,8 @@
+ | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
+ | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
+ | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
++| KV cache 1-byte quantization pilot | Rejected as a default path and closed as performance-inconclusive. An env-gated measurement pilot quantized newly written trunk KV rows (int8 + FP16 scale per 32/16/8-element block, per-element E4M3, V-only and K+V; FP16 storage unchanged, draft cache untouched) and compared full-vocab logits over 428-row teacher-forced continuations: every format drifts to 78–92% top-1 agreement with mean KL 4e-3–5e-2 across synthetic and real 16k–38k histories, 5–10× the accepted TP2 reduction noise (98.4%, 0.0055). Speed: writer overhead ~0 (32k single-host prefill medians 1557/1550/1558 tok/s for FP16/v8/E4M3); the sparse attention family is largely DRAM-bound so packed halved-bytes caps at ~+3–4% prefill best case, ~+1–2% realistic after in-reader dequant, decode ≤0.75%. No native packed reader was built; the pilot code was removed. Evidence: strix-dual-exp `evidence/kv1-drift`. |
++| HC inject partials fused into the combine (TP2 + single host) | Retained. The F16-norm combine's plain and paired-peer routes also emit the next mixer's inject partials from the normalized values they already hold: the F16 norm row is staged in LDS (aliasing the peer kernel's dead block-row stage) and replayed with the separate pass's exact thread grouping, load order and reduction tree, so the emitted partials are byte-identical and `HcMix` skips its `HcMixEpilogueF16Kernel<false>` pass; separate sibling kernels keep the non-emitting route's codegen unchanged. Operator check exact at 37/2 048 tokens (plain, peer, emitted partials aliasing the consumed logits); single-host dump bit-identical; paired member checksums canonical in every session. The emitting combine costs ~1.7% per call; the separate inject pass halves single-host (376→184 calls at 8k, matched profiles, ≈+0.8% e2e, within session noise) and disappears on TP2. Canary-clean interleaved pairs @32k: **median +2.65% (4/4, full separation; 2 269→2 329 tok/s)**, 8k +2.3% (2/2), decode flat. The MoE-epilogue-fused combine keeps its separate pass: its norm compiles to mixed-precision `v_fma_mix*_f16`, which a source-level replay cannot reproduce bit-exactly. Evidence: strix-dual-exp `evidence/prefill-triage/hcf1`. |
+ 
+ Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
+ to dense projections and 12.6% to attention/indexing. Final-tile catch-up
+@@ -113,3 +118,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -144,6 +185,12 @@ index 0b6a02b..57cb30f 100644
 +| TP2 tbstream two-host serving (2026-10-01) | First end-to-end serving on the local pair (both Strix Halo, kernel 7.2.6, Gen3 link, Q4_K_XL + MTP Q8): `tp_probe` two-host decode produces **identical text on both ranks**, and `--split 40` prefill is bit-stable on each rank (96/96 observations, no differences, logits max_abs_diff 0; world-1 reference 48/48). Serving smoke (4 sessions, context 65536, disk cache off): model load ~16 s per rank (~48-51 GB GPU memory per rank), TTFT 482 ms at 65-token prompt, **MTP decode 76.1 tok/s steady state** (draft 344, accepted 321 = 93%), **prefill 1159.7 tok/s** at a 3293-token prompt. Decode is compute-bound (13 ms/token vs ~23 µs per exchange); prefill is the exchange-heavy phase where the 1.1 GB/s transport plateau lands. Same flake package (`.#tp2-tbstream`) built on host 1 and copied as a closure to host 2 (local `nix-store --export \| --import` around signature enforcement); weights shipped over the 1 GbE LAN at 112 MB/s. |
 +| Multi-stream striping (blocked) | The configfs interface allows a second stream per peer (`stream/<router>.1/<name>`), and a second `/dev/tbstream1` appears on both hosts — but **no second DMA tunnel ever forms**: auto HopIDs stay `-1/-1` in both creation orders and manual values (9/9) are accepted without a path appearing (debugfs port path dump unchanged while writing). The first stream's tunnel works every time. Multi-stream on one cable is therefore blocked on the 7.2.6 driver — added to the upstream report list. Throughput scaling must come from kernel-side repost batching or a second cable. |
 +| Serving | Pending: the `gpu-tp2-tbstream` build and the two-host qualifying checklist on this pair. |
++| Paired prefill chunk-width re-sweep (TP2 tbstream, 2026-10-05) | Measurement. The single-host 2 048-token chunk choice re-swept under TP2 with the warmup/canary harness (canary-clean interleaved pairs @32 k non-MTP, member checksums canonical at every width): 1 536-token lanes **−3.7/−5.0 %** (35 % more layer exchanges), 3 072-token lanes **+1.3/+0.9/+1.4 %** (24 % fewer) but **−2.1 % @8 k**, where the 2 048-token tail chunk is a third of the work. Mixed-sign at ~1 %: the 2 048 default is retained; a depth-adaptive width is only worth revisiting for workloads dominated by very long prompts. |
++| TP2 output-projection launch plan (2026-10-05) | Retained. A rank's 2 560×3 072 `attn_out`/`ssm_out` takes the one-host 2 560×6 144 output projection's five-row-tile launch order and two-block LDS stages (same ten row tiles, half the activation bytes; per-output K order unchanged). Bit-exact — member checksums identical across the change; the operator test gained the 3 072-K shapes at 1 025/2 049 rows. Canary-clean interleaved pairs @32 k non-MTP: **+0.4/+0.9/+0.7 % (3/3)**, 8 k even. |
++| LDS-staged peer combine rows (2026-10-05) | Retained. The fused peer combine's four stream walks re-read each local/peer block element four times from global memory; the rows are now staged in 20 KiB of LDS once per token (same bytes, every reduction unchanged — operator check exact at 37/2 048 tokens, member checksums identical). Over the launch-plan twin: **+1.8/+1.6/+0.7/+0.3 % @32 k (4/4 clean pairs, median +1.15 %)**, 8 k even. Kernel mean 1 713.5 → 1 643.7 µs (−4 %) with expert-GEMM controls within 1.4 % — the repeated reads were evidently not all DRAM-bound, so the honest mechanism is smaller than the traffic estimate, retained for the consistent paired gain. |
++| Finer GDN row-split blocks on a TP rank (2026-10-05) | Retained. The 256-thread row-split kernel covers 64 state rows per block, so a TP rank's 24 value heads launch only 2×24 = 48 blocks against a full host's 96; the kernel is now block-size-templated and a rank's geometry dispatches 128-thread/32-row blocks (4×24 = 96, same per-row lanes and DPP reduction, so bit-exact — member checksums canonical in every session; the operator test gained the 8-key/24-value-head geometry with its F64 recurrence checks). Kernel mean 1 466.6 → 1 294.5 µs (**−11.7 %**, 844.7 → 745.6 ms per 32 k prefill) with routed-GEMM/attention/combine controls within 0.2 % in matched profiles; end-to-end @32 k **+0.19/+1.04/+0.60/−0.47/+0.03/+0.99 % (5/6 clean pairs, median +0.40 %)**, 8 k even (−0.4 % within the paired drift). |
++| Routed epilogue dead-tile skipping (2026-10-05) | Rejected. Bounding the paired gate/up and wide F16-output epilogue loops by `live_tok_tiles` (every dropped iteration was write-guarded no-op) made the routed kernels *slower*: +6–9 % per call in a matched profile (controls: GDN/attention/combine within 1 %) and **−2.45 % end-to-end** in a clean pair. Replacing the constant unrolled trip count with the runtime bound perturbed the live path's scheduling more than the dead tiles cost; the epilogue tails are not the routed family's bound (consistent with the earlier 256-row down-projection rejection). A predicated-body variant that keeps the unrolled form remains untested; expected ceiling ≤0.3 % end-to-end. |
++| TP2 split of the fused HC mixer down (2026-10-05) | Rejected. Each rank computed half of the 320 low-rank rows — F32 out, with `SiluScale` plus the assembly's round-to-nearest reproducing the fused epilogue bit for bit (operator check exact at 96/2 049 tokens; end-to-end member checksums canonical) — and a tagged start/finish pair was added to the tbstream transport so the mid-part exchange can interleave with the part-boundary exchanges. But a mid-part exchange cannot hide on this transport: the single staging worker serializes each 1.25 MB mixer half behind the preceding 20 MB part-boundary staging (~10 ms), so all 1 504 mixer calls pay ~5 ms of exposed latency — the timed 32 k prefill fell to **1 490 tok/s (−35 %)** against a modeled 260 ms GPU saving. The replicated mixer family is closed for exchange-based splits until small exchanges can be GPU-staged mid-part (the queued path stages on-GPU; the pair loop's boundary exchanges would have to move there first). Measurement trap found on the way: the probe's communicator decorator must delegate new transport methods, or a gated route silently never runs — the first four "A/B" pairs of this experiment were accidental A/A until a profile showed zero assembly-kernel launches. |
 diff --git a/docs/models/qwen3.8-flash-next/TP2.md b/docs/models/qwen3.8-flash-next/TP2.md
 index 348be6e..e6e5e3f 100644
 --- a/docs/models/qwen3.8-flash-next/TP2.md
@@ -296,7 +343,7 @@ index 0ba555c..00a2b92 100644
        );
  
 diff --git a/src/cli/serve/serve.cpp b/src/cli/serve/serve.cpp
-index e21cbbc..faf94a2 100644
+index e21cbbc..f1ca183 100644
 --- a/src/cli/serve/serve.cpp
 +++ b/src/cli/serve/serve.cpp
 @@ -46,6 +46,9 @@
@@ -369,7 +416,7 @@ index e21cbbc..faf94a2 100644
      if (tp_world_size == 2 &&
          (tp_control_token.empty() || tp_control_token.size() > 4096)) {
        std::cerr << "Error: TP2 requires --tp-control-token\n";
-@@ -1480,45 +1508,104 @@ int RunServe(std::span<const char* const> args) {
+@@ -1480,45 +1508,99 @@ int RunServe(std::span<const char* const> args) {
        (void)::sigaction(SIGINT, &stop, nullptr);
      }
      if (tp_world_size == 2) {
@@ -383,16 +430,14 @@ index e21cbbc..faf94a2 100644
 +        std::string tp_error;
 +        if (tp_transport == "tbstream") {
 +#ifdef GUFO_ENABLE_TP2_TBSTREAM
-+          const models::qwen38_flash_next::rocm::TbstreamConfig
-+              tbstream_config{
-+                  .rank = tp_rank,
-+                  .world_size = tp_world_size,
-+                  .bootstrap_host = tp_bootstrap_host,
-+                  .bootstrap_port = static_cast<std::uint16_t>(
-+                      tp_bootstrap_port),
-+                  .device_index = tp_device,
-+                  .device_path = tp_tbstream_device,
-+              };
++          const models::qwen38_flash_next::rocm::TbstreamConfig tbstream_config{
++              .rank = tp_rank,
++              .world_size = tp_world_size,
++              .bootstrap_host = tp_bootstrap_host,
++              .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
++              .device_index = tp_device,
++              .device_path = tp_tbstream_device,
++          };
 +          tp_communicator =
 +              models::qwen38_flash_next::rocm::CreateTbstreamCommunicator(
 +                  tbstream_config, &tp_error);
@@ -418,16 +463,14 @@ index e21cbbc..faf94a2 100644
 +              .rank = tp_rank,
 +              .world_size = tp_world_size,
 +              .bootstrap_host = tp_bootstrap_host,
-+              .bootstrap_port =
-+                  static_cast<std::uint16_t>(tp_bootstrap_port),
++              .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
 +              .device_index = tp_device,
 +              .rdma_device = tp_rdma_device,
 +              .rdma_port = tp_rdma_port,
-+              .gid_index =
-+                  tp_gid_index < 0
-+                      ? std::nullopt
-+                      : std::optional<std::uint32_t>(
-+                            static_cast<std::uint32_t>(tp_gid_index)),
++              .gid_index = tp_gid_index < 0
++                               ? std::nullopt
++                               : std::optional<std::uint32_t>(
++                                     static_cast<std::uint32_t>(tp_gid_index)),
 +          };
 +          tp_communicator =
 +              models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
@@ -442,16 +485,15 @@ index e21cbbc..faf94a2 100644
 +                    << " communicator not ready: " << tp_error << "\n";
 +          return false;
 +        }
-+        server::Logger::Info(
-+            "tp", "event=rdma_ready " + tp_communicator->Describe());
-+        tp_control = tp_rank == 0
-+                         ? server::TpControlChannel::Listen(
-+                               static_cast<std::uint16_t>(tp_control_port),
-+                               &tp_error)
-+                         : server::TpControlChannel::Connect(
-+                               tp_bootstrap_host,
-+                               static_cast<std::uint16_t>(tp_control_port),
-+                               &tp_error);
++        server::Logger::Info("tp",
++                             "event=rdma_ready " + tp_communicator->Describe());
++        tp_control =
++            tp_rank == 0
++                ? server::TpControlChannel::Listen(
++                      static_cast<std::uint16_t>(tp_control_port), &tp_error)
++                : server::TpControlChannel::Connect(
++                      tp_bootstrap_host,
++                      static_cast<std::uint16_t>(tp_control_port), &tp_error);
 +        if (!tp_control) {
 +          tp_communicator.reset();
 +          std::cerr << "TP2 worker control channel not ready: " << tp_error
@@ -508,7 +550,7 @@ index e21cbbc..faf94a2 100644
        return 2;
  #endif
      }
-@@ -1640,9 +1727,13 @@ int RunServe(std::span<const char* const> args) {
+@@ -1640,9 +1722,13 @@ int RunServe(std::span<const char* const> args) {
      return 1;
    }
    // Rank 0 of a TP2 pair whose peer or link is gone fails every request, so
@@ -524,7 +566,7 @@ index e21cbbc..faf94a2 100644
    std::atomic<bool> serving{true};
    std::thread pair_watch;
    if (tp_rank_zero) {
-@@ -1654,10 +1745,15 @@ int RunServe(std::span<const char* const> args) {
+@@ -1654,10 +1740,16 @@ int RunServe(std::span<const char* const> args) {
            continue;
          }
          server::Logger::Error(
@@ -537,7 +579,8 @@ index e21cbbc..faf94a2 100644
 +        ::kill(::getpid(), SIGTERM);
 +        std::this_thread::sleep_for(std::chrono::seconds(15));
 +        server::Logger::Error(
-+            "server", "event=tp_pair_lost action=exit reason=graceful-exit-timeout");
++            "server",
++            "event=tp_pair_lost action=exit reason=graceful-exit-timeout");
          std::_Exit(1);
        }
      });
@@ -580,7 +623,7 @@ index ed3c70f..d75895d 100644
    cpu_ops.cpp reference.cpp)
  target_link_libraries(gufo_qwen38_flash_next_reference PUBLIC
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
-index 3347a1d..b724ea9 100644
+index 3347a1d..1fd4ee4 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
 @@ -9,6 +9,46 @@
@@ -641,20 +684,18 @@ index 3347a1d..b724ea9 100644
                                                       hipStream_t stream,
                                                       std::string* error) = 0;
    /// The overlapped form of `ExchangePartial`, so the GPU computes other rows
-@@ -51,8 +93,10 @@ public:
+@@ -51,7 +93,10 @@ public:
    [[nodiscard]] virtual bool StartPartial(const float* data, std::size_t bytes,
                                            hipStream_t stream,
                                            std::string* error) = 0;
--  [[nodiscard]] virtual const float* FinishPartial(std::size_t bytes,
--                                                   std::string* error) = 0;
 +  /// `wire` reports the representation the returned peer partial uses, so
 +  /// the caller can dequantize while adding (f32 payloads report kF32).
-+  [[nodiscard]] virtual const float* FinishPartial(
-+      std::size_t bytes, TbstreamWire* wire, std::string* error) = 0;
+   [[nodiscard]] virtual const float* FinishPartial(std::size_t bytes,
++                                                   TbstreamWire* wire,
+                                                    std::string* error) = 0;
  
    /// The GPU's half of a queued exchange (QueuePartial). Queue on the stream,
-   /// in this order: copy the partial to `send` and then publish `value` in
-@@ -69,6 +113,9 @@ public:
+@@ -69,6 +114,9 @@ public:
      std::uint32_t* arrivals{nullptr};  ///< StagePartial's block counter
      std::uint32_t* timed_out{nullptr};
      std::uint64_t wait_ticks{0};
@@ -665,10 +706,147 @@ index 3347a1d..b724ea9 100644
    /// Queues an exchange of `bytes` without blocking the caller: a background
    /// thread sends this rank's partial once the stream publishes it and
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
-index de09320..6ed7d72 100644
+index de09320..d3ea1aa 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
-@@ -1576,14 +1576,46 @@ Executor::TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
+@@ -307,7 +307,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
+     return nullptr;
+   }
+   if (static_cast<bool>(options.split_reduce.start) !=
+-          static_cast<bool>(options.split_reduce.finish) ||
++          static_cast<bool>(options.split_reduce.acquire) ||
+       (options.split_reduce.start && model.tp_world_size() == 1)) {
+     AssignError(error_msg,
+                 "a split reduce needs both halves and distributed execution");
+@@ -1105,15 +1105,52 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
+   return true;
+ }
+ 
+-void Executor::Combine(float* res, const float* gamma,
+-                       std::uint32_t n_tokens) const {
++void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
++                       const float* next_inject_w) const {
+   const Config& c = config();
+   // Wide batches hand the next mixer an F16 norm for its epilogue and the
+   // same norm quantized into the tiled Q8 layout for its W8A8 down
+   // projection: half the bytes for the combine and the epilogue, and no
+   // separate activation pass for the projection.
+   xn_half_ = wide_mixer_ && MatrixRows(n_tokens) && gamma != nullptr;
++  // On the F16 norm route the combine can also emit the next mixer's inject
++  // partials from the norm values it already holds (HcCombineF16 /
++  // HcCombinePeerF16's inject variants), replacing the mixer's separate
++  // inject pass; `inject_ready_` tells that mixer the partials are in
++  // s_.inject. Every route below resets it, emitted or not.
++  const float* emit_w =
++      xn_half_ && next_inject_w != nullptr ? next_inject_w : nullptr;
++  inject_ready_ = false;
++  // A paired lane's peer partial folds into this combine (see ForwardPair).
++  // When the fused kernel's geometry or the wire representation is not
++  // covered, the plain add runs first and every route stays unchanged.
++  const auto add_pending = [&]() {
++    if (pending_peer_ == nullptr) {
++      return;
++    }
++    const auto rows = static_cast<std::uint32_t>(
++        pending_bytes_ / (sizeof(float) * c.hidden_size));
++    switch (pending_wire_) {
++      case TbstreamWire::kF32:
++        AddRowsBroadcast(pending_peer_, pending_block_, rows, c.hidden_size, 1,
++                         stream_);
++        break;
++      case TbstreamWire::kF16:
++        AddRowsBroadcastF16(reinterpret_cast<const __half*>(pending_peer_),
++                            pending_block_, rows, c.hidden_size, stream_);
++        break;
++      case TbstreamWire::kQ8:
++        AddRowsBroadcastQ8(reinterpret_cast<const __half*>(pending_peer_),
++                           reinterpret_cast<const std::int8_t*>(pending_peer_) +
++                               TbstreamQ8DataOffset(pending_bytes_),
++                           pending_block_, rows, c.hidden_size, stream_);
++        break;
++    }
++    pending_peer_ = nullptr;
++    pending_summed_ = nullptr;
++  };
+   if (moe_pending_) {
++    add_pending();
+     // The MoE epilogue was deferred to this combine (see Moe).
+     moe_pending_ = false;
+     const auto* down = reinterpret_cast<const __half*>(s_.down_e);
+@@ -1131,11 +1168,38 @@ void Executor::Combine(float* res, const float* gamma,
+                        c.hidden_size, stream_);
+   }
+   if (xn_half_) {
++    if (pending_peer_ != nullptr && pending_wire_ == TbstreamWire::kF32 &&
++        HcCombinePeerF16(res, s_.block_out, pending_peer_, pending_summed_,
++                         s_.inject, inject_parts_, gamma, s_.xn_half, s_.xn_q8t,
++                         n_tokens, c.hidden_size, c.hc_count, c.rms_eps,
++                         stream_, emit_w, s_.inject)) {
++      pending_peer_ = nullptr;
++      pending_summed_ = nullptr;
++      if (emit_w != nullptr) {
++        inject_parts_ = HcInjectPartsVec4(c.hidden_size);
++        inject_ready_ = true;
++      }
++      return;
++    }
++    add_pending();
+     HcCombineF16(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn_half,
+                  s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count, c.rms_eps,
+-                 stream_);
++                 stream_, emit_w, s_.inject);
++    if (emit_w != nullptr) {
++      inject_parts_ = HcInjectPartsVec4(c.hidden_size);
++      inject_ready_ = true;
++    }
++    return;
++  }
++  if (pending_peer_ != nullptr && pending_wire_ == TbstreamWire::kF32 &&
++      HcCombinePeer(res, s_.block_out, pending_peer_, pending_summed_,
++                    s_.inject, inject_parts_, gamma, s_.xn, n_tokens,
++                    c.hidden_size, c.hc_count, c.rms_eps, stream_)) {
++    pending_peer_ = nullptr;
++    pending_summed_ = nullptr;
+     return;
+   }
++  add_pending();
+   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, n_tokens,
+             c.hidden_size, c.hc_count, c.rms_eps, stream_);
+ }
+@@ -1185,6 +1249,11 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
+   }
+   const bool fused_inject =
+       inject != nullptr && !m.inject.empty() && m.inject.type == GgmlType::kF32;
++  // The combine that produced this mixer's input may already have emitted
++  // its inject partials (Combine's inject variants); when it did, the
++  // epilogue skips its inject pass and s_.inject keeps them.
++  const float* inject_pass_w =
++      fused_inject && !inject_ready_ ? m.inject.f32() : nullptr;
+   const float* xn = s_.xn;
+   const bool vectorized =
+       xn_half_ ||
+@@ -1197,16 +1266,14 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
+   if (xn_half_) {
+     if (fused_projection) {
+       if (!HcMixF16Gemm(m.up.data, reinterpret_cast<const __half*>(s_.hc_gate),
+-                        s_.xn_half, fused_inject ? m.inject.f32() : nullptr,
+-                        mixed, static_cast<__half*>(s_.x_half), s_.x_q8t,
+-                        inject, n_tokens, c.hidden_size, c.hc_low_rank,
+-                        stream_)) {
++                        s_.xn_half, inject_pass_w, mixed,
++                        static_cast<__half*>(s_.x_half), s_.x_q8t, inject,
++                        n_tokens, c.hidden_size, c.hc_low_rank, stream_)) {
+         AssignError(error_msg, "fused HC projection failed");
+         return false;
+       }
+     } else {
+-      HcMixEpilogueVec4F16(s_.xn_half, s_.hc_gate,
+-                           fused_inject ? m.inject.f32() : nullptr, mixed,
++      HcMixEpilogueVec4F16(s_.xn_half, s_.hc_gate, inject_pass_w, mixed,
+                            extras ? static_cast<__half*>(s_.x_half) : nullptr,
+                            extras ? s_.x_q8t : nullptr, inject, n_tokens,
+                            c.hidden_size, stream_);
+@@ -1576,14 +1643,46 @@ Executor::TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
      if (!communicator->QueuePartial(bytes, &queued, error)) {
        return false;
      }
@@ -709,62 +887,919 @@ index de09320..6ed7d72 100644
 +                              stream);
 +          break;
 +        case TbstreamWire::kQ8:
-+          AddRowsBroadcastQ8(
-+              reinterpret_cast<const __half*>(queued.peer),
-+              reinterpret_cast<const std::int8_t*>(queued.peer) +
-+                  TbstreamQ8DataOffset(bytes),
-+              data, static_cast<std::uint32_t>(rows), hidden, stream);
++          AddRowsBroadcastQ8(reinterpret_cast<const __half*>(queued.peer),
++                             reinterpret_cast<const std::int8_t*>(queued.peer) +
++                                 TbstreamQ8DataOffset(bytes),
++                             data, static_cast<std::uint32_t>(rows), hidden,
++                             stream);
 +          break;
 +      }
      }
      return true;
    };
-@@ -1611,14 +1643,31 @@ Executor::SplitReduce Executor::TwoRankSplitReduce(
-   reduce.finish = [communicator = std::move(communicator), hidden](
-                       float* data, std::size_t bytes, hipStream_t stream,
-                       std::string* error) {
+@@ -1608,19 +1707,10 @@ Executor::SplitReduce Executor::TwoRankSplitReduce(
+                                 hipStream_t stream, std::string* error) {
+     return communicator->StartPartial(data, bytes, stream, error);
+   };
+-  reduce.finish = [communicator = std::move(communicator), hidden](
+-                      float* data, std::size_t bytes, hipStream_t stream,
+-                      std::string* error) {
 -    const float* peer = communicator->FinishPartial(bytes, error);
-+    TbstreamWire wire = TbstreamWire::kF32;
-+    const float* peer = communicator->FinishPartial(bytes, &wire, error);
-     if (peer == nullptr) {
-       return false;
-     }
-     const std::size_t rows = bytes / (sizeof(float) * hidden);
-     if (rows != 0) {
+-    if (peer == nullptr) {
+-      return false;
+-    }
+-    const std::size_t rows = bytes / (sizeof(float) * hidden);
+-    if (rows != 0) {
 -      AddRowsBroadcast(peer, data, static_cast<std::uint32_t>(rows), hidden, 1,
 -                       stream);
-+      switch (wire) {
-+        case TbstreamWire::kF32:
-+          AddRowsBroadcast(peer, data, static_cast<std::uint32_t>(rows),
-+                           hidden, 1, stream);
-+          break;
-+        case TbstreamWire::kF16:
-+          AddRowsBroadcastF16(reinterpret_cast<const __half*>(peer), data,
-+                              static_cast<std::uint32_t>(rows), hidden,
-+                              stream);
-+          break;
-+        case TbstreamWire::kQ8:
-+          AddRowsBroadcastQ8(
-+              reinterpret_cast<const __half*>(peer),
-+              reinterpret_cast<const std::int8_t*>(peer) +
-+                  TbstreamQ8DataOffset(bytes),
-+              data, static_cast<std::uint32_t>(rows), hidden, stream);
-+          break;
-+      }
+-    }
+-    return true;
++  reduce.acquire = [communicator = std::move(communicator)](
++                       std::size_t bytes, TbstreamWire* wire,
++                       std::string* error) {
++    return communicator->FinishPartial(bytes, wire, error);
+   };
+   return reduce;
+ }
+@@ -2284,11 +2374,16 @@ bool Executor::ForwardPair(Session& session,
+       for (std::size_t i = 0; i < flying; ++i) {
+         const Lane& lane = *in_flight[i];
+         std::string ignored;
+-        (void)reduce.finish(lane.scratch.block_out,
+-                            static_cast<std::size_t>(lane.batch.n) *
+-                                executor->config().hidden_size * sizeof(float),
+-                            executor->stream_, &ignored);
++        TbstreamWire wire = TbstreamWire::kF32;
++        // Drain the host-side wait only, in start order: the stream already
++        // carries meaningless sums, and the forward's own failure is what
++        // the caller reports.
++        (void)reduce.acquire(static_cast<std::size_t>(lane.batch.n) *
++                                 executor->config().hidden_size * sizeof(float),
++                             &wire, &ignored);
+       }
++      executor->pending_peer_ = nullptr;
++      executor->pending_summed_ = nullptr;
+       executor->UseScratch(base);
+     }
+   } settle{this, base, in_flight, flying};
+@@ -2329,8 +2424,10 @@ bool Executor::ForwardPair(Session& session,
      }
      return true;
    };
+-  // Adds the peer's partial of the lane's last part; after a MoE output, the
+-  // layer's final combine follows.
++  // Adds the peer's partial of the lane's last part by acquiring it for the
++  // combine that consumes the lane's block output: fused on the wide route
++  // (Combine reads local and peer directly), a plain add otherwise. After a
++  // MoE output, the layer's final combine follows.
+   const auto finish = [&](Lane& lane) {
+     if (flying == 0 || in_flight[0] != &lane) {
+       AssignError(error_msg, "prefill pair sums finished out of order");
+@@ -2339,16 +2436,25 @@ bool Executor::ForwardPair(Session& session,
+     in_flight[0] = in_flight[1];
+     --flying;
+     lane.pending = false;
+-    if (!options_.split_reduce.finish(s_.block_out, bytes(lane), stream_,
+-                                      error_msg)) {
++    TbstreamWire wire = TbstreamWire::kF32;
++    const float* peer =
++        options_.split_reduce.acquire(bytes(lane), &wire, error_msg);
++    if (peer == nullptr) {
+       return false;
+     }
++    pending_peer_ = peer;
++    pending_block_ = lane.scratch.block_out;
++    pending_bytes_ = bytes(lane);
++    pending_wire_ = wire;
+     const std::uint32_t part = lane.part - 1;
+     if (part % 2 == 1) {
++      // The reduced MoE output the observer reads is the summed row, so the
++      // fused combine writes it back into the block buffer for that read.
++      pending_summed_ = options_.moe_observer ? s_.block_out : nullptr;
++      lane.normed = LayerBack(part / 2, lane.batch.n);
+       if (options_.moe_observer) {
+         options_.moe_observer(s_.block_out, bytes(lane), stream_);
+       }
+-      lane.normed = LayerBack(part / 2, lane.batch.n);
+     }
+     return true;
+   };
+@@ -2430,13 +2536,18 @@ bool Executor::ForwardPair(Session& session,
+   if (session.mtp_enabled_) {
+     // Catch up over A (hidden rows from A's residual), bridge to B's first
+     // token from A's kept final row, keep B's rows, then catch up over B.
++    // Every known-hidden catch-up needs only persistent draft state, so it
++    // takes the K/V-only path the unpaired prefill already uses; the next
++    // full forward (the next chunk's catch-up or the decode anchor)
++    // rebuilds the predictor residual from the kept trunk rows.
+     PrefillPhase draft_phase(false);
+     enter(lanes[0]);
+     const std::uint32_t kept_a = std::min(n_a, options_.max_speculative);
+-    if (!MtpForward(session, tokens.subspan(1, n_a - 1), 0, {}, error_msg,
+-                    s_.res) ||
++    if (!MtpForward(session, tokens.subspan(1, n_a - 1), 0, {.kv_only = true},
++                    error_msg, s_.res) ||
+         !MtpForward(session, tokens.subspan(n_a, 1),
+-                    static_cast<std::int32_t>(kept_a - 1), {}, error_msg) ||
++                    static_cast<std::int32_t>(kept_a - 1), {.kv_only = true},
++                    error_msg) ||
+         !keep(lanes[1])) {
+       return false;
+     }
+@@ -2450,8 +2561,8 @@ bool Executor::ForwardPair(Session& session,
+   if (session.mtp_enabled_ && n_b > 1) {
+     PrefillPhase draft_phase(false);
+     enter(lanes[1]);
+-    if (!MtpForward(session, tokens.subspan(n_a + 1), 0, {}, error_msg,
+-                    s_.res)) {
++    if (!MtpForward(session, tokens.subspan(n_a + 1), 0, {.kv_only = true},
++                    error_msg, s_.res)) {
+       return false;
+     }
+   }
+@@ -2495,8 +2606,13 @@ bool Executor::MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
+                        std::string* error_msg) const {
+   const DeviceLayer& l = model_->layers()[il];
+   // Each combine also norms the residual for the mixer that follows it,
+-  // unless PLE rewrites the residual first.
+-  Combine(s_.res, l.hc_ffn.norm.f32(), n_tokens);
++  // unless PLE rewrites the residual first. With an f32 inject projection
++  // that mixer's inject partials are emitted by the combine itself.
++  const float* ffn_inject =
++      !l.hc_ffn.inject.empty() && l.hc_ffn.inject.type == GgmlType::kF32
++          ? l.hc_ffn.inject.f32()
++          : nullptr;
++  Combine(s_.res, l.hc_ffn.norm.f32(), n_tokens, ffn_inject);
+   return HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, n_tokens,
+                error_msg) &&
+          Moe(l, s_.mixed, s_.block_out, n_tokens, error_msg, false, reduce);
+@@ -2504,12 +2620,22 @@ bool Executor::MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
+ 
+ bool Executor::LayerBack(std::uint32_t il, std::uint32_t n_tokens) const {
+   const Config& c = config();
++  const bool ple_next = il + 1 < c.num_layers && c.IsPleLayer(il + 1);
+   const float* next_norm =
+       il + 1 < c.num_layers
+-          ? (c.IsPleLayer(il + 1) ? nullptr
+-                                  : model_->layers()[il + 1].hc_attn.norm.f32())
++          ? (ple_next ? nullptr : model_->layers()[il + 1].hc_attn.norm.f32())
+           : model_->hc_head().norm.f32();
+-  Combine(s_.res, next_norm, n_tokens);
++  // The next layer's attention mixer re-norms after PLE itself, and the
++  // head mixer norms its own tail rows, so only that mixer's combine emits.
++  const DeviceMixer* next_mixer = il + 1 < c.num_layers && !ple_next
++                                      ? &model_->layers()[il + 1].hc_attn
++                                      : nullptr;
++  const float* next_inject = next_mixer != nullptr &&
++                                     !next_mixer->inject.empty() &&
++                                     next_mixer->inject.type == GgmlType::kF32
++                                 ? next_mixer->inject.f32()
++                                 : nullptr;
++  Combine(s_.res, next_norm, n_tokens, next_inject);
+   return next_norm != nullptr;
+ }
+ 
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
+index b103e94..23c6590 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
+@@ -138,15 +138,20 @@ private:
+ /// sized once for `max_batch` tokens; longer prompts are fed in chunks.
+ class Executor {
+ public:
+-  /// A two-rank sum split into its start and its finish, so the GPU computes
+-  /// other rows while a partial is in flight. `start` queues the exchange of
+-  /// the partial at `data`, pending on the stream; `finish` waits for the
+-  /// oldest started exchange and adds the peer's partial into `data` on the
+-  /// stream. Sums finish in the order they started.
++  /// A two-rank sum split into its start and its acquire, so the GPU
++  /// computes other rows while a partial is in flight. `start` queues the
++  /// exchange of the partial at `data`, pending on the stream, and returns
++  /// at once. `acquire` waits for the oldest started exchange, which must
++  /// carry `bytes`, and returns the peer's partial WITHOUT adding it: the
++  /// caller folds the sum into the work that consumes the local partial
++  /// (fused with the following combine on the wide route, or a plain add).
++  /// Sums finish in the order they started.
+   struct SplitReduce {
+     std::function<bool(const float*, std::size_t, hipStream_t, std::string*)>
+         start;
+-    std::function<bool(float*, std::size_t, hipStream_t, std::string*)> finish;
++    std::function<const float*(std::size_t bytes, TbstreamWire* wire,
++                               std::string* error)>
++        acquire;
+   };
+ 
+   struct Options {
+@@ -427,7 +432,8 @@ private:
+   void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
+   /// Residual update by the block output plus the grouped norm for the next
+   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
+-  void Combine(float* res, const float* gamma, std::uint32_t n_tokens) const;
++  void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
++               const float* next_inject_w = nullptr) const;
+   /// Hashes the batch's n-gram rows and starts reading them from disk, so
+   /// the read overlaps the layers before the PLE one.
+   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
+@@ -690,8 +696,23 @@ private:
+   mutable bool half_bf16_{false};
+   /// Set by a combine that wrote s_.xn_half / s_.xn_q8t instead of s_.xn.
+   mutable bool xn_half_{false};
++  /// A paired lane's acquired peer partial (ForwardPair), waiting to be
++  /// folded into the combine that consumes the lane's block output:
++  /// `pending_block_` is that lane's block buffer, `pending_summed_` the
++  /// optional destination for the summed row (the MoE observer's read), and
++  /// `pending_bytes_`/`pending_wire_` the exchange's f32 payload size and
++  /// wire representation. See Combine.
++  mutable const float* pending_peer_{nullptr};
++  mutable float* pending_block_{nullptr};
++  mutable float* pending_summed_{nullptr};
++  mutable std::size_t pending_bytes_{0};
++  mutable TbstreamWire pending_wire_{TbstreamWire::kF32};
+   /// Partial sums per inject logit the last HcMix left in s_.inject.
+   mutable std::uint32_t inject_parts_{1};
++  /// Set by a combine that emitted the NEXT mixer's inject partials into
++  /// s_.inject (HcCombineF16/HcCombinePeerF16's inject variants); that
++  /// mixer then skips its own inject pass.
++  mutable bool inject_ready_{false};
+   mutable unsigned q8_slot_{0};
+ };
+ 
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
-index 506db2c..5148983 100644
+index 506db2c..111ba42 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
-@@ -2582,6 +2582,33 @@ __global__ void AddRowsBroadcastKernel(const float* addend, float* residual,
+@@ -622,6 +622,550 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
+   }
+ }
+ 
++/// HcCombineVec4Kernel<__half> that also emits the NEXT mixer's inject
++/// partials from the F16 norm row it writes: the norm is staged in LDS and
++/// replayed with the inject pass's exact thread grouping (part p's block
++/// covers columns [p*kThreads*4, ...) across all four streams), stream-major
++/// per-thread adds, WaveSum tree and wave-ordered partial sums, so the
++/// emitted partials match HcInjectPartialF16 over the same row bit for bit
++/// and the mixer's separate inject pass disappears. `inject_out` may alias
++/// `inject`: every block reads its own token's logits before rewriting them.
++__global__ void HcCombineVec4InjectF16Kernel(
++    float* res, const float* block_out, const float* inject,
++    std::uint32_t inject_parts, float* inject_out, const float* inject_w,
++    const float* gamma, __half* xn, void* xn_q8, std::uint32_t hidden,
++    float eps) {
++  constexpr std::uint32_t kStreams = 4;
++  constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
++  __shared__ float shared[kStreams][kThreads / 32];
++  __shared__ __half s_xn[4 * 2560];
++  const std::uint32_t t = blockIdx.x;
++  const std::size_t hc_dim = static_cast<std::size_t>(kStreams) * hidden;
++  float w[kStreams];
++#pragma unroll
++  for (std::uint32_t s = 0; s < kStreams; ++s) {
++    float logit = 0.0f;
++    for (std::uint32_t p = 0; p < inject_parts; ++p) {
++      logit +=
++          inject[(static_cast<std::size_t>(t) * kStreams + s) * inject_parts +
++                 p];
++    }
++    w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
++  }
++  float* dst = res + static_cast<std::size_t>(t) * hc_dim;
++  const float* src = block_out + static_cast<std::size_t>(t) * hidden;
++  float4 v[kMaxChunks];
++  float ss[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
++#pragma unroll
++  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
++    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
++    v[c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
++    if (e < hc_dim) {
++      const std::uint32_t s = e / hidden;
++      const std::uint32_t i = e - (s * hidden);
++      const float ws = w[s];
++      const float4 r = *reinterpret_cast<const float4*>(dst + e);
++      const float4 b = *reinterpret_cast<const float4*>(src + i);
++      v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
++                    r.w + b.w * ws};
++      *reinterpret_cast<float4*>(dst + e) = v[c];
++      const float sq =
++          v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z + v[c].w * v[c].w;
++#pragma unroll
++      for (std::uint32_t k = 0; k < kStreams; ++k) {
++        ss[k] += (k == s) ? sq : 0.0F;
++      }
++    }
++  }
++  const std::uint32_t lane = threadIdx.x & 31u;
++  const std::uint32_t wave = threadIdx.x >> 5u;
++#pragma unroll
++  for (std::uint32_t k = 0; k < kStreams; ++k) {
++    ss[k] = WaveSum(ss[k]);
++    if (lane == 0) {
++      shared[k][wave] = ss[k];
++    }
++  }
++  __syncthreads();
++  float scale[kStreams];
++#pragma unroll
++  for (std::uint32_t k = 0; k < kStreams; ++k) {
++    float total = 0.0F;
++    for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
++      total += shared[k][q];
++    }
++    scale[k] = rsqrtf(total / static_cast<float>(hidden) + eps);
++  }
++  const std::size_t num_blocks = hc_dim / 32;
++#pragma unroll
++  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
++    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
++    // Every lane of the wave takes part in the block reductions below, so
++    // lanes past the row carry zeros instead of leaving.
++    float4 n{0.0F, 0.0F, 0.0F, 0.0F};
++    if (e < hc_dim) {
++      const std::uint32_t s = e / hidden;
++      const float sc = scale[s];
++      const float4 gm = *reinterpret_cast<const float4*>(gamma + e);
++      n = float4{v[c].x * sc * gm.x, v[c].y * sc * gm.y, v[c].z * sc * gm.z,
++                 v[c].w * sc * gm.w};
++      __half* out = xn + (static_cast<std::size_t>(t) * hc_dim) + e;
++      const __half2 lo = __floats2half2_rn(n.x, n.y);
++      const __half2 hi = __floats2half2_rn(n.z, n.w);
++      *reinterpret_cast<__half2*>(out) = lo;
++      *reinterpret_cast<__half2*>(out + 2) = hi;
++      *reinterpret_cast<__half2*>(s_xn + e) = lo;
++      *reinterpret_cast<__half2*>(s_xn + e + 2) = hi;
++    }
++    if (xn_q8 == nullptr) {
++      continue;
++    }
++    // Eight lanes hold one 32-wide block: absmax over them, then each lane
++    // stores its four codes as one word.
++    float max_abs =
++        fmaxf(fmaxf(fabsf(n.x), fabsf(n.y)), fmaxf(fabsf(n.z), fabsf(n.w)));
++    for (int off = 4; off > 0; off >>= 1) {
++      max_abs = fmaxf(max_abs, __shfl_xor(max_abs, off));
++    }
++    if (e < hc_dim) {
++      const float d = max_abs / 127.0F;
++      const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
++      const auto q0 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.x * id))));
++      const auto q1 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.y * id))));
++      const auto q2 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.z * id))));
++      const auto q3 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.w * id))));
++      const std::size_t kb = e / 32;
++      const std::uint32_t pos = e % 32;  // 0, 4, ..., 28
++      std::int8_t* tile =
++          Q8ActTile(xn_q8, num_blocks, t / kQ8ActTileTokens, kb);
++      const std::size_t tl = t % kQ8ActTileTokens;
++      *reinterpret_cast<std::uint32_t*>(tile + ((pos >> 4u) * 256) + (tl * 16) +
++                                        (pos & 15u)) =
++          q0 | (q1 << 8) | (q2 << 16) | (q3 << 24);
++      if (pos == 0) {
++        *reinterpret_cast<float*>(tile + kQ8ActScaleOffset +
++                                  (tl * sizeof(float))) = d;
++      }
++    }
++  }
++  // The inject replay: the staged norm row is read exactly as the separate
++  // pass reads the global one — the weights staged into a register array
++  // first, then the four norm vectors, then the same stream-major
++  // accumulation — so every partial sum keeps its operands and reduction
++  // order.
++  const std::uint32_t parts = (hidden + 4 * kThreads - 1) / (4 * kThreads);
++  __syncthreads();
++  for (std::uint32_t part = 0; part < parts; ++part) {
++    const std::uint32_t i = (part * kThreads + threadIdx.x) * 4;
++    const bool live = i < hidden;
++    float4 wq[kStreams][kStreams];
++#pragma unroll
++    for (std::uint32_t o = 0; o < kStreams; ++o) {
++#pragma unroll
++      for (std::uint32_t s = 0; s < kStreams; ++s) {
++        wq[o][s] = live
++                       ? *reinterpret_cast<const float4*>(
++                             inject_w + (static_cast<std::size_t>(o) * hc_dim) +
++                             (static_cast<std::size_t>(s) * hidden) + i)
++                       : float4{0.0F, 0.0F, 0.0F, 0.0F};
++      }
++    }
++    float4 vj[kStreams];
++#pragma unroll
++    for (std::uint32_t s = 0; s < kStreams; ++s) {
++      vj[s] = live ? Load4(s_xn + (static_cast<std::size_t>(s) * hidden) + i)
++                   : float4{0.0F, 0.0F, 0.0F, 0.0F};
++    }
++#pragma unroll
++    for (std::uint32_t o = 0; o < kStreams; ++o) {
++      float dot = 0.0F;
++#pragma unroll
++      for (std::uint32_t s = 0; s < kStreams; ++s) {
++        dot += wq[o][s].x * vj[s].x;
++        dot += wq[o][s].y * vj[s].y;
++        dot += wq[o][s].z * vj[s].z;
++        dot += wq[o][s].w * vj[s].w;
++      }
++      dot = WaveSum(dot);
++      if (lane == 0) {
++        shared[o][wave] = dot;
++      }
++    }
++    __syncthreads();
++    if (threadIdx.x < kStreams) {
++      float total = 0.0F;
++      for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
++        total += shared[threadIdx.x][q];
++      }
++      inject_out[(static_cast<std::size_t>(t) * kStreams + threadIdx.x) *
++                     parts +
++                 part] = total;
++    }
++    __syncthreads();
++  }
++}
++
++/// HcCombineVec4Kernel<XnT> whose block output is the elementwise FP32 sum
++/// of a local partial and the peer's exchange partial (AddRowsBroadcast's
++/// sum, local + peer, formed in registers): the paired-prefill reduction
++/// folds into the combine, so the summed block output never round-trips
++/// memory. A non-null `block_summed` still receives the sum, for observers
++/// that read the reduced output.
++template<typename XnT>
++__global__ void HcCombinePeerVec4Kernel(
++    float* res, const float* block_local, const float* peer,
++    float* block_summed, const float* inject, std::uint32_t inject_parts,
++    const float* gamma, XnT* xn, void* xn_q8, std::uint32_t hidden, float eps) {
++  constexpr std::uint32_t kStreams = 4;
++  constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
++  // The local and peer block rows staged once: every stream's chunk walk
++  // re-reads the same hidden element four times, and the rows of a launch
++  // far exceed the caches, so the repeated reads go to DRAM. Staged copies
++  // carry the same bytes, so every result stays bit for bit.
++  constexpr std::uint32_t kMaxRow4 = 640;  // 2560 / 4
++  __shared__ float4 s_row[2][kMaxRow4];
++  __shared__ float shared[kStreams][kThreads / 32];
++  const std::uint32_t t = blockIdx.x;
++  const std::size_t hc_dim = static_cast<std::size_t>(kStreams) * hidden;
++  float w[kStreams];
++#pragma unroll
++  for (std::uint32_t s = 0; s < kStreams; ++s) {
++    float logit = 0.0f;
++    for (std::uint32_t p = 0; p < inject_parts; ++p) {
++      logit +=
++          inject[(static_cast<std::size_t>(t) * kStreams + s) * inject_parts +
++                 p];
++    }
++    w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
++  }
++  float* dst = res + static_cast<std::size_t>(t) * hc_dim;
++  const float* src_local = block_local + static_cast<std::size_t>(t) * hidden;
++  const float* src_peer = peer + static_cast<std::size_t>(t) * hidden;
++  const std::uint32_t hidden4 = hidden / 4;
++  for (std::uint32_t k = threadIdx.x; k < hidden4; k += kThreads) {
++    s_row[0][k] = *reinterpret_cast<const float4*>(src_local + k * 4);
++    s_row[1][k] = *reinterpret_cast<const float4*>(src_peer + k * 4);
++  }
++  __syncthreads();
++  const std::uint32_t chunks = static_cast<std::uint32_t>(hc_dim / 4);
++  float4 v[kMaxChunks];
++  float ss[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
++#pragma unroll
++  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
++    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
++    v[c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
++    if (e < hc_dim) {
++      const std::uint32_t s = e / hidden;
++      const std::uint32_t i = e - (s * hidden);
++      const float ws = w[s];
++      const float4 r = *reinterpret_cast<const float4*>(dst + e);
++      const float4 l = s_row[0][(c * kThreads + threadIdx.x) % hidden4];
++      const float4 p = s_row[1][(c * kThreads + threadIdx.x) % hidden4];
++      const float4 b = float4{l.x + p.x, l.y + p.y, l.z + p.z, l.w + p.w};
++      if (block_summed != nullptr) {
++        *reinterpret_cast<float4*>(
++            block_summed + static_cast<std::size_t>(t) * hidden + i) = b;
++      }
++      v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
++                    r.w + b.w * ws};
++      *reinterpret_cast<float4*>(dst + e) = v[c];
++      const float sq =
++          v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z + v[c].w * v[c].w;
++#pragma unroll
++      for (std::uint32_t k = 0; k < kStreams; ++k) {
++        ss[k] += (k == s) ? sq : 0.0F;
++      }
++    }
++  }
++  if (gamma == nullptr) {
++    return;
++  }
++  const std::uint32_t lane = threadIdx.x & 31u;
++  const std::uint32_t wave = threadIdx.x >> 5u;
++#pragma unroll
++  for (std::uint32_t k = 0; k < kStreams; ++k) {
++    ss[k] = WaveSum(ss[k]);
++    if (lane == 0) {
++      shared[k][wave] = ss[k];
++    }
++  }
++  __syncthreads();
++  float scale[kStreams];
++#pragma unroll
++  for (std::uint32_t k = 0; k < kStreams; ++k) {
++    float total = 0.0F;
++    for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
++      total += shared[k][q];
++    }
++    scale[k] = rsqrtf(total / static_cast<float>(hidden) + eps);
++  }
++  const std::size_t num_blocks = hc_dim / 32;
++#pragma unroll
++  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
++    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
++    // Every lane of the wave takes part in the block reductions below, so
++    // lanes past the row carry zeros instead of leaving.
++    float4 n{0.0F, 0.0F, 0.0F, 0.0F};
++    if (e < hc_dim) {
++      const std::uint32_t s = e / hidden;
++      const float sc = scale[s];
++      const float4 gm = *reinterpret_cast<const float4*>(gamma + e);
++      n = float4{v[c].x * sc * gm.x, v[c].y * sc * gm.y, v[c].z * sc * gm.z,
++                 v[c].w * sc * gm.w};
++      XnT* out = xn + (static_cast<std::size_t>(t) * hc_dim) + e;
++      if constexpr (std::is_same_v<XnT, float>) {
++        *reinterpret_cast<float4*>(out) = n;
++      } else {
++        *reinterpret_cast<__half2*>(out) = __floats2half2_rn(n.x, n.y);
++        *reinterpret_cast<__half2*>(out + 2) = __floats2half2_rn(n.z, n.w);
++      }
++    }
++    if (xn_q8 == nullptr) {
++      continue;
++    }
++    // Eight lanes hold one 32-wide block: absmax over them, then each lane
++    // stores its four codes as one word.
++    float max_abs =
++        fmaxf(fmaxf(fabsf(n.x), fabsf(n.y)), fmaxf(fabsf(n.z), fabsf(n.w)));
++    for (int off = 4; off > 0; off >>= 1) {
++      max_abs = fmaxf(max_abs, __shfl_xor(max_abs, off));
++    }
++    if (e < hc_dim) {
++      const float d = max_abs / 127.0F;
++      const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
++      const auto q0 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.x * id))));
++      const auto q1 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.y * id))));
++      const auto q2 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.z * id))));
++      const auto q3 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.w * id))));
++      const std::size_t kb = e / 32;
++      const std::uint32_t pos = e % 32;  // 0, 4, ..., 28
++      std::int8_t* tile =
++          Q8ActTile(xn_q8, num_blocks, t / kQ8ActTileTokens, kb);
++      const std::size_t tl = t % kQ8ActTileTokens;
++      *reinterpret_cast<std::uint32_t*>(tile + ((pos >> 4u) * 256) + (tl * 16) +
++                                        (pos & 15u)) =
++          q0 | (q1 << 8) | (q2 << 16) | (q3 << 24);
++      if (pos == 0) {
++        *reinterpret_cast<float*>(tile + kQ8ActScaleOffset +
++                                  (tl * sizeof(float))) = d;
++      }
++    }
++  }
++}
++
++/// HcCombinePeerVec4Kernel<__half> that also emits the NEXT mixer's inject
++/// partials from the F16 norm row it writes (see HcCombineVec4InjectF16Kernel
++/// for the bit-exact replay contract). The staged norm aliases the local/peer
++/// block-row LDS, which the chunk loop has fully consumed by the time the
++/// norm phase runs; `inject_out` may alias `inject`.
++__global__ void HcCombinePeerVec4InjectF16Kernel(
++    float* res, const float* block_local, const float* peer,
++    float* block_summed, const float* inject, std::uint32_t inject_parts,
++    float* inject_out, const float* inject_w, const float* gamma, __half* xn,
++    void* xn_q8, std::uint32_t hidden, float eps) {
++  constexpr std::uint32_t kStreams = 4;
++  constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
++  // The local and peer block rows staged once: every stream's chunk walk
++  // re-reads the same hidden element four times, and the rows of a launch
++  // far exceed the caches, so the repeated reads go to DRAM. Staged copies
++  // carry the same bytes, so every result stays bit for bit.
++  constexpr std::uint32_t kMaxRow4 = 640;  // 2560 / 4
++  __shared__ float4 s_row[2][kMaxRow4];
++  __shared__ float shared[kStreams][kThreads / 32];
++  const std::uint32_t t = blockIdx.x;
++  const std::size_t hc_dim = static_cast<std::size_t>(kStreams) * hidden;
++  float w[kStreams];
++#pragma unroll
++  for (std::uint32_t s = 0; s < kStreams; ++s) {
++    float logit = 0.0f;
++    for (std::uint32_t p = 0; p < inject_parts; ++p) {
++      logit +=
++          inject[(static_cast<std::size_t>(t) * kStreams + s) * inject_parts +
++                 p];
++    }
++    w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
++  }
++  float* dst = res + static_cast<std::size_t>(t) * hc_dim;
++  const float* src_local = block_local + static_cast<std::size_t>(t) * hidden;
++  const float* src_peer = peer + static_cast<std::size_t>(t) * hidden;
++  const std::uint32_t hidden4 = hidden / 4;
++  for (std::uint32_t k = threadIdx.x; k < hidden4; k += kThreads) {
++    s_row[0][k] = *reinterpret_cast<const float4*>(src_local + k * 4);
++    s_row[1][k] = *reinterpret_cast<const float4*>(src_peer + k * 4);
++  }
++  __syncthreads();
++  const std::uint32_t chunks = static_cast<std::uint32_t>(hc_dim / 4);
++  float4 v[kMaxChunks];
++  float ss[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
++#pragma unroll
++  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
++    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
++    v[c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
++    if (e < hc_dim) {
++      const std::uint32_t s = e / hidden;
++      const std::uint32_t i = e - (s * hidden);
++      const float ws = w[s];
++      const float4 r = *reinterpret_cast<const float4*>(dst + e);
++      const float4 l = s_row[0][(c * kThreads + threadIdx.x) % hidden4];
++      const float4 p = s_row[1][(c * kThreads + threadIdx.x) % hidden4];
++      const float4 b = float4{l.x + p.x, l.y + p.y, l.z + p.z, l.w + p.w};
++      if (block_summed != nullptr) {
++        *reinterpret_cast<float4*>(
++            block_summed + static_cast<std::size_t>(t) * hidden + i) = b;
++      }
++      v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
++                    r.w + b.w * ws};
++      *reinterpret_cast<float4*>(dst + e) = v[c];
++      const float sq =
++          v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z + v[c].w * v[c].w;
++#pragma unroll
++      for (std::uint32_t k = 0; k < kStreams; ++k) {
++        ss[k] += (k == s) ? sq : 0.0F;
++      }
++    }
++  }
++  const std::uint32_t lane = threadIdx.x & 31u;
++  const std::uint32_t wave = threadIdx.x >> 5u;
++#pragma unroll
++  for (std::uint32_t k = 0; k < kStreams; ++k) {
++    ss[k] = WaveSum(ss[k]);
++    if (lane == 0) {
++      shared[k][wave] = ss[k];
++    }
++  }
++  __syncthreads();
++  float scale[kStreams];
++#pragma unroll
++  for (std::uint32_t k = 0; k < kStreams; ++k) {
++    float total = 0.0F;
++    for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
++      total += shared[k][q];
++    }
++    scale[k] = rsqrtf(total / static_cast<float>(hidden) + eps);
++  }
++  const std::size_t num_blocks = hc_dim / 32;
++  // The norm row the inject replay reads, aliasing the dead block-row stage.
++  __half* s_xn = reinterpret_cast<__half*>(s_row);
++#pragma unroll
++  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
++    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
++    // Every lane of the wave takes part in the block reductions below, so
++    // lanes past the row carry zeros instead of leaving.
++    float4 n{0.0F, 0.0F, 0.0F, 0.0F};
++    if (e < hc_dim) {
++      const std::uint32_t s = e / hidden;
++      const float sc = scale[s];
++      const float4 gm = *reinterpret_cast<const float4*>(gamma + e);
++      n = float4{v[c].x * sc * gm.x, v[c].y * sc * gm.y, v[c].z * sc * gm.z,
++                 v[c].w * sc * gm.w};
++      __half* out = xn + (static_cast<std::size_t>(t) * hc_dim) + e;
++      const __half2 lo = __floats2half2_rn(n.x, n.y);
++      const __half2 hi = __floats2half2_rn(n.z, n.w);
++      *reinterpret_cast<__half2*>(out) = lo;
++      *reinterpret_cast<__half2*>(out + 2) = hi;
++      *reinterpret_cast<__half2*>(s_xn + e) = lo;
++      *reinterpret_cast<__half2*>(s_xn + e + 2) = hi;
++    }
++    if (xn_q8 == nullptr) {
++      continue;
++    }
++    // Eight lanes hold one 32-wide block: absmax over them, then each lane
++    // stores its four codes as one word.
++    float max_abs =
++        fmaxf(fmaxf(fabsf(n.x), fabsf(n.y)), fmaxf(fabsf(n.z), fabsf(n.w)));
++    for (int off = 4; off > 0; off >>= 1) {
++      max_abs = fmaxf(max_abs, __shfl_xor(max_abs, off));
++    }
++    if (e < hc_dim) {
++      const float d = max_abs / 127.0F;
++      const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
++      const auto q0 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.x * id))));
++      const auto q1 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.y * id))));
++      const auto q2 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.z * id))));
++      const auto q3 = static_cast<std::uint32_t>(static_cast<std::uint8_t>(
++          static_cast<std::int8_t>(roundf(n.w * id))));
++      const std::size_t kb = e / 32;
++      const std::uint32_t pos = e % 32;  // 0, 4, ..., 28
++      std::int8_t* tile =
++          Q8ActTile(xn_q8, num_blocks, t / kQ8ActTileTokens, kb);
++      const std::size_t tl = t % kQ8ActTileTokens;
++      *reinterpret_cast<std::uint32_t*>(tile + ((pos >> 4u) * 256) + (tl * 16) +
++                                        (pos & 15u)) =
++          q0 | (q1 << 8) | (q2 << 16) | (q3 << 24);
++      if (pos == 0) {
++        *reinterpret_cast<float*>(tile + kQ8ActScaleOffset +
++                                  (tl * sizeof(float))) = d;
++      }
++    }
++  }
++  // The inject replay: the staged norm row is read exactly as the separate
++  // pass reads the global one — the weights staged into a register array
++  // first, then the four norm vectors, then the same stream-major
++  // accumulation — so every partial sum keeps its operands and reduction
++  // order.
++  const std::uint32_t parts = (hidden + 4 * kThreads - 1) / (4 * kThreads);
++  __syncthreads();
++  for (std::uint32_t part = 0; part < parts; ++part) {
++    const std::uint32_t i = (part * kThreads + threadIdx.x) * 4;
++    const bool live = i < hidden;
++    float4 wq[kStreams][kStreams];
++#pragma unroll
++    for (std::uint32_t o = 0; o < kStreams; ++o) {
++#pragma unroll
++      for (std::uint32_t s = 0; s < kStreams; ++s) {
++        wq[o][s] = live
++                       ? *reinterpret_cast<const float4*>(
++                             inject_w + (static_cast<std::size_t>(o) * hc_dim) +
++                             (static_cast<std::size_t>(s) * hidden) + i)
++                       : float4{0.0F, 0.0F, 0.0F, 0.0F};
++      }
++    }
++    float4 vj[kStreams];
++#pragma unroll
++    for (std::uint32_t s = 0; s < kStreams; ++s) {
++      vj[s] = live ? Load4(s_xn + (static_cast<std::size_t>(s) * hidden) + i)
++                   : float4{0.0F, 0.0F, 0.0F, 0.0F};
++    }
++#pragma unroll
++    for (std::uint32_t o = 0; o < kStreams; ++o) {
++      float dot = 0.0F;
++#pragma unroll
++      for (std::uint32_t s = 0; s < kStreams; ++s) {
++        dot += wq[o][s].x * vj[s].x;
++        dot += wq[o][s].y * vj[s].y;
++        dot += wq[o][s].z * vj[s].z;
++        dot += wq[o][s].w * vj[s].w;
++      }
++      dot = WaveSum(dot);
++      if (lane == 0) {
++        shared[o][wave] = dot;
++      }
++    }
++    __syncthreads();
++    if (threadIdx.x < kStreams) {
++      float total = 0.0F;
++      for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
++        total += shared[threadIdx.x][q];
++      }
++      inject_out[(static_cast<std::size_t>(t) * kStreams + threadIdx.x) *
++                     parts +
++                 part] = total;
++    }
++    __syncthreads();
++  }
++}
++
+ /// HcCombineVec4Kernel<__half> with the MoE epilogue fused in: the block
+ /// output row is formed in registers from the routed experts' F16 rows,
+ /// their weights and the gated shared expert (MoeEpilogueVec4Kernel), so the
+@@ -1109,7 +1653,8 @@ __device__ __forceinline__ void GdnRowReduce(float& u, float& p) {
+ /// flight, one window ahead of the one being committed.
+ constexpr int kGdnWindow = 4;
+ constexpr int kGdnWindowsAhead = 3;
+-__launch_bounds__(256) __global__
++template<int kBlockThreads>
++__launch_bounds__(kBlockThreads) __global__
+     void GdnRowSplitKernel(const float* conv_out, const float* scales,
+                            const float* ab, float* state, float* raw,
+                            std::uint32_t n_tokens, std::uint32_t k_heads,
+@@ -1119,11 +1664,14 @@ __launch_bounds__(256) __global__
+   constexpr int kVec = kKeysPerLane / 4;
+   constexpr int kLanesPerRow = d / kKeysPerLane;
+   constexpr int kRowsPerWave = 32 / kLanesPerRow;
+-  constexpr int kRowsPerBlock = kRowsPerWave * 8;
++  constexpr int kRowsPerBlock = kRowsPerWave * (kBlockThreads / 32);
+   constexpr int kW = kGdnWindow;
+-  static_assert(kW * (d / 4) * 2 == 256, "one q or k float4 per thread");
+-  static_assert(kW * kRowsPerBlock == 256, "one v element per thread");
+-  static_assert(kW * 5 <= 256, "scales and decays per window");
++  constexpr int kQkLoads = kW * (d / 4) * 2 / kBlockThreads;
++  static_assert(kW * (d / 4) * 2 == kQkLoads * kBlockThreads,
++                "q and k float4 split over the block");
++  static_assert(kW * kRowsPerBlock == kBlockThreads,
++                "one v element per thread");
++  static_assert(kW * 5 <= kBlockThreads, "scales and decays per window");
+   const int h = blockIdx.y;
+   const int tid = threadIdx.x;
+   const int lane = tid & 31;
+@@ -1149,18 +1697,33 @@ __launch_bounds__(256) __global__
+     s[i] = state4[vec0 + i];
+   }
+ 
+-  // Window loads: thread tid takes q (tid < 128) or k float4 (tid / 32 of
+-  // token (tid / 32) % kW ... laid out so a token's 128 floats are 32
+-  // consecutive threads), one v element and, for tid < 5 kW, one scale.
+-  const int qk_which = tid >> 7;      // 0: q, 1: k
+-  const int qk_tok = (tid >> 5) & 3;  // token in the window
+-  const int qk_vec = tid & 31;
+-  const int v_tok = tid >> 6;
+-  const int v_row = tid & 63;
++  // Window loads: each thread takes its share of the window's q and k
++  // float4 (a token's 128 floats are 32 consecutive threads), one v
++  // element and, for tid < 5 kW, one scale.
++  struct QkMap {
++    int which;
++    int tok;
++    int slot;
++    const float* src;
++  };
++  QkMap qk[kQkLoads];
++#pragma unroll
++  for (int i = 0; i < kQkLoads; ++i) {
++    const int idx = tid + i * kBlockThreads;
++    const int which = idx >> 7;
++    const int vec = idx & 31;
++    qk[i].which = which;
++    qk[i].tok = (idx >> 5) & 3;
++    // A token's 32 float4 are stored [i][segment] so the four segments of
++    // a row's lanes read adjacent 16-byte chunks (row-major, they were 128
++    // bytes apart: a four-way bank conflict on every fragment).
++    qk[i].slot = ((vec % kVec) * kLanesPerRow) + (vec / kVec);
++    qk[i].src = conv_out + (which == 0 ? kh : k_heads + kh) * d + (vec * 4);
++  }
++  const int v_tok = tid / kRowsPerBlock;
++  const int v_row = tid % kRowsPerBlock;
+   const int m_tok = tid / 5;
+   const int m_idx = tid % 5;
+-  const float* qk_src =
+-      conv_out + (qk_which == 0 ? kh : k_heads + kh) * d + (qk_vec * 4);
+   const float* v_src =
+       conv_out + 2 * k_heads * d + h * d + blockIdx.x * kRowsPerBlock + v_row;
+   const float* m_src =
+@@ -1170,7 +1733,7 @@ __launch_bounds__(256) __global__
+   // Three windows of loads in flight, as named registers (a ring array
+   // lands in scratch).
+   struct Window {
+-    float4 qk;
++    float4 qk[kQkLoads];
+     float v;
+     float m;
+   };
+@@ -1179,22 +1742,24 @@ __launch_bounds__(256) __global__
+   Window r2;
+   const auto load_window = [&](int w, Window& r) {
+     const int last = static_cast<int>(n_tokens) - 1;
+-    const int t_qk = min((w * kW) + qk_tok, last);
++#pragma unroll
++    for (int i = 0; i < kQkLoads; ++i) {
++      const int t_qk = min((w * kW) + qk[i].tok, last);
++      r.qk[i] = *reinterpret_cast<const float4*>(
++          qk[i].src + static_cast<std::size_t>(t_qk) * channels);
++    }
+     const int t_v = min((w * kW) + v_tok, last);
+-    r.qk = *reinterpret_cast<const float4*>(
+-        qk_src + static_cast<std::size_t>(t_qk) * channels);
+     r.v = v_src[static_cast<std::size_t>(t_v) * channels];
+     if (tid < 5 * kW) {
+       const int t_m = min((w * kW) + m_tok, last);
+       r.m = m_src[static_cast<std::size_t>(t_m) * m_stride];
+     }
+   };
+-  // A token's 32 float4 are stored [i][segment] so the four segments of
+-  // a row's lanes read adjacent 16-byte chunks (row-major, they were 128
+-  // bytes apart: a four-way bank conflict on every fragment).
+-  const int qk_slot = ((qk_vec % kVec) * kLanesPerRow) + (qk_vec / kVec);
+   const auto commit_window = [&](const Window& r, int lds) {
+-    s_qk[lds][qk_which][qk_tok][qk_slot] = r.qk;
++#pragma unroll
++    for (int i = 0; i < kQkLoads; ++i) {
++      s_qk[lds][qk[i].which][qk[i].tok][qk[i].slot] = r.qk[i];
++    }
+     s_v[lds][v_tok][v_row] = r.v;
+     if (tid < 5 * kW) {
+       s_misc[lds][m_tok][m_idx] = r.m;
+@@ -2582,6 +3147,31 @@ __global__ void AddRowsBroadcastKernel(const float* addend, float* residual,
    }
  }
  
 +/// The peer's partial arrived as fp16 on the wire: convert while adding.
-+__global__ void AddRowsBroadcastF16Kernel(const __half* addend,
-+                                          float* residual,
++__global__ void AddRowsBroadcastF16Kernel(const __half* addend, float* residual,
 +                                          std::uint32_t hidden) {
 +  const std::uint32_t t = blockIdx.x;
 +  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
@@ -784,15 +1819,14 @@ index 506db2c..5148983 100644
 +  const std::size_t row = static_cast<std::size_t>(t) * hidden;
 +  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
 +    const std::size_t e = row + i;
-+    residual[e] += __half2float(scales[e >> 5]) *
-+                   static_cast<float>(data[e]);
++    residual[e] += __half2float(scales[e >> 5]) * static_cast<float>(data[e]);
 +  }
 +}
 +
  // Every thread's copies reach the system scope before its block is counted;
  // the last block to finish publishes `value`, so the host that reads it also
  // sees the whole partial.
-@@ -2613,6 +2640,88 @@ __global__ void StagePartialKernel(const float* __restrict__ partial,
+@@ -2613,6 +3203,84 @@ __global__ void StagePartialKernel(const float* __restrict__ partial,
    }
  }
  
@@ -829,8 +1863,7 @@ index 506db2c..5148983 100644
 +      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 +  const std::size_t pairs = count / 2;
 +  for (std::size_t i = first; i < pairs; i += stride) {
-+    const float2 v =
-+        reinterpret_cast<const float2*>(partial)[i];
++    const float2 v = reinterpret_cast<const float2*>(partial)[i];
 +    reinterpret_cast<__half2*>(send)[i] = __float22half2_rn(v);
 +  }
 +  if ((count & 1) != 0 && first == 0) {
@@ -842,13 +1875,10 @@ index 506db2c..5148983 100644
 +/// q8-on-the-wire staging: one warp owns each 32-element block, computes the
 +/// block's fp16 scale from its max magnitude, and writes int8 quotients at
 +/// `data` (the payload's scales array precedes it, 16-byte aligned).
-+__global__ void StagePartialQ8Kernel(const float* __restrict__ partial,
-+                                     __half* __restrict__ scales,
-+                                     std::int8_t* __restrict__ data,
-+                                     std::size_t count, std::size_t blocks,
-+                                     std::uint32_t* arrivals,
-+                                     std::uint64_t* ready,
-+                                     std::uint64_t value) {
++__global__ void StagePartialQ8Kernel(
++    const float* __restrict__ partial, __half* __restrict__ scales,
++    std::int8_t* __restrict__ data, std::size_t count, std::size_t blocks,
++    std::uint32_t* arrivals, std::uint64_t* ready, std::uint64_t value) {
 +  const unsigned warps_per_block = blockDim.x >> 5;
 +  const unsigned lane = threadIdx.x & 31u;
 +  const unsigned warp = threadIdx.x >> 5;
@@ -881,7 +1911,133 @@ index 506db2c..5148983 100644
  __global__ void WaitValueKernel(const std::uint64_t* flag, std::uint64_t value,
                                  std::uint64_t ticks, std::uint32_t* timed_out) {
    const std::uint64_t start = wall_clock64();
-@@ -6194,6 +6303,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
+@@ -4577,6 +5245,19 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
+   }
+ }
+ 
++/// The fused HC projection's inject-only pass over an F16 norm row, launched
++/// exactly as HcMixF16Gemm launches it inside the fused projection: the
++/// reference the combine's inject-emitting variants must reproduce bit for
++/// bit.
++void HcInjectPartialF16(const __half* xn, const float* inject_w, float* inject,
++                        std::uint32_t n_tokens, std::uint32_t hidden,
++                        hipStream_t stream) {
++  hipLaunchKernelGGL((HcMixEpilogueF16Kernel<false>),
++                     dim3(HcInjectPartsVec4(hidden), n_tokens), dim3(kThreads),
++                     0, stream, xn, nullptr, inject_w, nullptr, nullptr,
++                     nullptr, inject, hidden);
++}
++
+ void HcCombine(float* res, const float* block_out, const float* inject,
+                std::uint32_t inject_parts, const float* gamma, float* xn,
+                std::uint32_t n_tokens, std::uint32_t hidden,
+@@ -4617,9 +5298,17 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
+ void HcCombineF16(float* res, const float* block_out, const float* inject,
+                   std::uint32_t inject_parts, const float* gamma, __half* xn,
+                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
+-                  std::uint32_t streams, float eps, hipStream_t stream) {
++                  std::uint32_t streams, float eps, hipStream_t stream,
++                  const float* inject_w, float* inject_out) {
+   // F16 prefill keeps the same reduction even for a one-token tail.
+   if (streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
++    if (inject_w != nullptr && gamma != nullptr && inject_out != nullptr) {
++      hipLaunchKernelGGL(HcCombineVec4InjectF16Kernel, dim3(n_tokens),
++                         dim3(kThreads), 0, stream, res, block_out, inject,
++                         inject_parts, inject_out, inject_w, gamma, xn, xn_q8,
++                         hidden, eps);
++      return;
++    }
+     hipLaunchKernelGGL(HcCombineVec4Kernel<__half>, dim3(n_tokens),
+                        dim3(kThreads), 0, stream, res, block_out, inject,
+                        inject_parts, gamma, xn, xn_q8, hidden, eps);
+@@ -4630,6 +5319,51 @@ void HcCombineF16(float* res, const float* block_out, const float* inject,
+                      inject_parts, gamma, xn, xn_q8, hidden, streams, eps);
+ }
+ 
++bool HcCombinePeerF16(float* res, const float* block_local, const float* peer,
++                      float* block_summed, const float* inject,
++                      std::uint32_t inject_parts, const float* gamma,
++                      __half* xn, void* xn_q8, std::uint32_t n_tokens,
++                      std::uint32_t hidden, std::uint32_t streams, float eps,
++                      hipStream_t stream, const float* inject_w,
++                      float* inject_out) {
++  // Every stream re-reads block_local's row; an in-place summed row would
++  // have later streams add the peer again. A caller that wants the sum in
++  // the block buffer takes the separate-add route instead.
++  if (streams != 4 || hidden % 128 != 0 || hidden > 2560 ||
++      block_summed == block_local) {
++    return false;
++  }
++  if (inject_w != nullptr && gamma != nullptr && inject_out != nullptr) {
++    hipLaunchKernelGGL(HcCombinePeerVec4InjectF16Kernel, dim3(n_tokens),
++                       dim3(kThreads), 0, stream, res, block_local, peer,
++                       block_summed, inject, inject_parts, inject_out, inject_w,
++                       gamma, xn, xn_q8, hidden, eps);
++    return true;
++  }
++  hipLaunchKernelGGL(HcCombinePeerVec4Kernel<__half>, dim3(n_tokens),
++                     dim3(kThreads), 0, stream, res, block_local, peer,
++                     block_summed, inject, inject_parts, gamma, xn, xn_q8,
++                     hidden, eps);
++  return true;
++}
++
++bool HcCombinePeer(float* res, const float* block_local, const float* peer,
++                   float* block_summed, const float* inject,
++                   std::uint32_t inject_parts, const float* gamma, float* xn,
++                   std::uint32_t n_tokens, std::uint32_t hidden,
++                   std::uint32_t streams, float eps, hipStream_t stream) {
++  // See HcCombinePeerF16: the summed row must not alias block_local.
++  if (n_tokens < 16 || streams != 4 || hidden % 128 != 0 || hidden > 2560 ||
++      block_summed == block_local) {
++    return false;
++  }
++  hipLaunchKernelGGL(HcCombinePeerVec4Kernel<float>, dim3(n_tokens),
++                     dim3(kThreads), 0, stream, res, block_local, peer,
++                     block_summed, inject, inject_parts, gamma, xn, nullptr,
++                     hidden, eps);
++  return true;
++}
++
+ void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream) {
+   hipLaunchKernelGGL(SiluScaleKernel, dim3(Blocks(count)), dim3(kThreads), 0,
+                      stream, x, scale, count);
+@@ -5652,6 +6386,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
+       // changes.
+       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1, 5>), grid,
+                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
++    } else if (batch >= 1024 && m == 2560 && k == 3072) {
++      // A TP2 rank's output projection: half the activation bytes per token
++      // of the one-host 6144 shape, the same ten row tiles, so the same
++      // five-row-tile launch order and stage plan apply.
++      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1, 5>), grid,
++                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+     } else if (batch >= 1024 && (m == 16384 || m == 13312) && k == 2560) {
+       // Eight row groups reuse each weight fragment across all token tiles
+       // and keep fewer weight fragments live. K accumulation is unchanged.
+@@ -5873,9 +6613,18 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
+         dim3(Blocks(static_cast<std::size_t>(n_tokens) * v_heads)),
+         dim3(kThreads), 0, stream, alpha_beta, a, dt, kn,
+         static_cast<std::size_t>(n_tokens) * v_heads, v_heads);
+-    hipLaunchKernelGGL(GdnRowSplitKernel, dim3(kGdnDim / 64, v_heads),
+-                       dim3(kThreads), 0, stream, conv_scratch, qn, kn, state,
+-                       raw, n_tokens, k_heads, v_heads);
++    // The 64-row block grid covers a full host's value heads (2 x 48 = 96
++    // blocks); a TP rank's half launches only 48, under-filling the device,
++    // so it takes 32-row blocks at half the threads (4 x heads blocks).
++    if (v_heads * (kGdnDim / 64) < 64) {
++      hipLaunchKernelGGL((GdnRowSplitKernel<128>), dim3(kGdnDim / 32, v_heads),
++                         dim3(128), 0, stream, conv_scratch, qn, kn, state, raw,
++                         n_tokens, k_heads, v_heads);
++    } else {
++      hipLaunchKernelGGL((GdnRowSplitKernel<256>), dim3(kGdnDim / 64, v_heads),
++                         dim3(256), 0, stream, conv_scratch, qn, kn, state, raw,
++                         n_tokens, k_heads, v_heads);
++    }
+   } else {
+     hipLaunchKernelGGL(GdnPrepKernel<false>,
+                        dim3((n_tokens * k_heads + waves - 1) / waves),
+@@ -6194,6 +6943,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
                       stream, addend, residual, hidden, streams);
  }
  
@@ -902,7 +2058,7 @@ index 506db2c..5148983 100644
  void StagePartial(const float* partial, float* send, std::size_t count,
                    std::uint32_t* arrivals, std::uint64_t* ready,
                    std::uint64_t value, hipStream_t stream) {
-@@ -6204,6 +6327,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+@@ -6204,6 +6967,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
                       stream, partial, send, count, arrivals, ready, value);
  }
  
@@ -922,8 +2078,8 @@ index 506db2c..5148983 100644
 +                    hipStream_t stream) {
 +  const std::size_t blocks_needed = (count + 31) / 32;
 +  // 256-thread blocks = 8 warps; one warp per 32-element block.
-+  const auto blocks = static_cast<unsigned>(std::min<std::size_t>(
-+      1024, (blocks_needed + 7) / 8));
++  const auto blocks = static_cast<unsigned>(
++      std::min<std::size_t>(1024, (blocks_needed + 7) / 8));
 +  hipLaunchKernelGGL(StagePartialQ8Kernel, dim3(blocks), dim3(256), 0, stream,
 +                     partial, scales, data, count, blocks_needed, arrivals,
 +                     ready, value);
@@ -933,10 +2089,73 @@ index 506db2c..5148983 100644
                 std::uint64_t ticks, std::uint32_t* timed_out,
                 hipStream_t stream) {
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
-index 83f4b74..8f64916 100644
+index 83f4b74..010060d 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
-@@ -477,6 +477,17 @@ void AddRowsBroadcast(const float* addend, float* residual,
+@@ -83,6 +83,12 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
+                           __half* mixed_half, void* mixed_q8, float* inject,
+                           std::uint32_t n_tokens, std::uint32_t hidden,
+                           hipStream_t stream);
++/// The fused HC projection's inject-only pass over an F16 norm row, launched
++/// exactly as HcMixF16Gemm launches it: the reference the combine's
++/// inject-emitting variants reproduce bit for bit.
++void HcInjectPartialF16(const __half* xn, const float* inject_w, float* inject,
++                        std::uint32_t n_tokens, std::uint32_t hidden,
++                        hipStream_t stream);
+ 
+ /// res[t][s][i] += block_out[t][i] * 2*sigmoid(inject[t][s] / streams), and
+ /// when `gamma` is non-null also the next mixer's grouped RMSNorm of the
+@@ -98,11 +104,17 @@ void HcCombine(float* res, const float* block_out, const float* inject,
+ /// mixer's projection and epilogue consume on the F16 mixer input route.
+ /// A non-null `xn_q8` also receives the norm quantized into the tiled Q8
+ /// layout (`Q8TiledBytes(n_tokens, streams * hidden)`) for the W8A8 down
+-/// projection; hidden must be a multiple of 32.
++/// projection; hidden must be a multiple of 32. With `inject_w` (the NEXT
++/// mixer's [streams][hc_dim] f32 inject weights) and `inject_out` the Vec4
++/// route also emits that mixer's inject partials from the norm it writes —
++/// identical bytes to HcInjectPartialF16 over the same norm row — so the
++/// mixer's separate inject pass can be skipped; `inject_out` may alias the
++/// consumed `inject` partials (each block rewrites only its own token's).
+ void HcCombineF16(float* res, const float* block_out, const float* inject,
+                   std::uint32_t inject_parts, const float* gamma, __half* xn,
+                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
+-                  std::uint32_t streams, float eps, hipStream_t stream);
++                  std::uint32_t streams, float eps, hipStream_t stream,
++                  const float* inject_w = nullptr, float* inject_out = nullptr);
+ /// HcCombineF16 with the MoE epilogue fused in: the block output is
+ /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
+ /// F16 rows), `weights`, the gated shared expert; it is formed in
+@@ -116,6 +128,29 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
+                      const float* gamma, __half* xn, void* xn_q8,
+                      std::uint32_t n_tokens, std::uint32_t hidden,
+                      std::uint32_t streams, float eps, hipStream_t stream);
++/// HcCombineF16 with the paired-prefill peer reduction fused in: the block
++/// output is the elementwise FP32 sum of `block_local` and `peer`
++/// (AddRowsBroadcast's sum, local + peer, formed in registers), so the
++/// summed partial never round-trips memory. A non-null `block_summed`
++/// still receives the sum, for observers that read the reduced output;
++/// it must not alias `block_local` (every stream re-reads the local row,
++/// so an in-place sum would add the peer again). Returns false (launching
++/// nothing) for a geometry the Vec4 kernel does not cover or an aliasing
++/// `block_summed`. `inject_w`/`inject_out` carry HcCombineF16's inject
++/// emission on this route as well.
++bool HcCombinePeerF16(float* res, const float* block_local, const float* peer,
++                      float* block_summed, const float* inject,
++                      std::uint32_t inject_parts, const float* gamma,
++                      __half* xn, void* xn_q8, std::uint32_t n_tokens,
++                      std::uint32_t hidden, std::uint32_t streams, float eps,
++                      hipStream_t stream, const float* inject_w = nullptr,
++                      float* inject_out = nullptr);
++/// The float-`xn` route of HcCombinePeerF16 (the F32 combine's Vec4 path).
++bool HcCombinePeer(float* res, const float* block_local, const float* peer,
++                   float* block_summed, const float* inject,
++                   std::uint32_t inject_parts, const float* gamma, float* xn,
++                   std::uint32_t n_tokens, std::uint32_t hidden,
++                   std::uint32_t streams, float eps, hipStream_t stream);
+ 
+ /// x[i] = silu(x[i] * scale), in place over `count` floats.
+ void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);
+@@ -477,6 +512,17 @@ void AddRowsBroadcast(const float* addend, float* residual,
                        std::uint32_t n_tokens, std::uint32_t hidden,
                        std::uint32_t streams, hipStream_t stream);
  
@@ -954,7 +2173,7 @@ index 83f4b74..8f64916 100644
  /// Copies `count` floats of a partial into a host-visible send window, then
  /// publishes `value` in `ready` once every block's copy is visible to the
  /// host. `arrivals` counts finished blocks and must start at zero; the last
-@@ -485,6 +496,18 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+@@ -485,6 +531,18 @@ void StagePartial(const float* partial, float* send, std::size_t count,
                    std::uint32_t* arrivals, std::uint64_t* ready,
                    std::uint64_t value, hipStream_t stream);
  
@@ -975,20 +2194,18 @@ index 83f4b74..8f64916 100644
  void WaitValue(const std::uint64_t* flag, std::uint64_t value,
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
 new file mode 100644
-index 0000000..a03dfb1
+index 0000000..4d1b276
 --- /dev/null
 +++ b/src/models/qwen38_flash_next/kernels/rocm/tbstream.cpp
-@@ -0,0 +1,1722 @@
+@@ -0,0 +1,1718 @@
 +#include "src/models/qwen38_flash_next/kernels/rocm/tbstream.hpp"
 +
-+#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
-+
-+#include <hip/hip_fp16.h>
-+
 +#include <fcntl.h>
++#include <hip/hip_fp16.h>
 +#include <netdb.h>
 +#include <netinet/tcp.h>
 +#include <poll.h>
++#include <pthread.h>
 +#include <sched.h>
 +#include <sys/socket.h>
 +#include <sys/stat.h>
@@ -1009,11 +2226,12 @@ index 0000000..a03dfb1
 +#include <memory>
 +#include <mutex>
 +#include <optional>
-+#include <pthread.h>
 +#include <string>
 +#include <system_error>
 +#include <thread>
 +#include <utility>
++
++#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 +
 +namespace gufo::models::qwen38_flash_next::rocm {
 +namespace {
@@ -1527,8 +2745,8 @@ index 0000000..a03dfb1
 +      return false;
 +    }
 +    try {
-+      const int rc = ::pthread_create(&reader_tid_, nullptr, ReadTrampoline,
-+                                      this);
++      const int rc =
++          ::pthread_create(&reader_tid_, nullptr, ReadTrampoline, this);
 +      if (rc != 0) {
 +        throw std::system_error(rc, std::generic_category());
 +      }
@@ -1635,8 +2853,7 @@ index 0000000..a03dfb1
 +            .queued = false});
 +    std::string transfer_error;
 +    if (!WriteFrame(*bound_scope_, operation_id,
-+                    TbstreamWireBytes(bytes, exchange_wire),
-+                    &transfer_error)) {
++                    TbstreamWireBytes(bytes, exchange_wire), &transfer_error)) {
 +      Poison(error, std::move(transfer_error));
 +      return nullptr;
 +    }
@@ -2086,8 +3303,7 @@ index 0000000..a03dfb1
 +        static_cast<std::uint8_t*>(flags_device_) + kReadyOffset);
 +    switch (wire) {
 +      case TbstreamWire::kF32:
-+        return hipMemcpyAsync(payload, data, fp32_bytes,
-+                              hipMemcpyDeviceToHost,
++        return hipMemcpyAsync(payload, data, fp32_bytes, hipMemcpyDeviceToHost,
 +                              stream) == hipSuccess;
 +      case TbstreamWire::kF16:
 +        StagePartialF16(data, reinterpret_cast<__half*>(payload), count,
@@ -2170,12 +3386,11 @@ index 0000000..a03dfb1
 +          }
 +        }
 +      } else if (!device ||
-+                 hipStreamWaitEvent(copy_stream_, job.ready, 0) !=
-+                     hipSuccess ||
++                 hipStreamWaitEvent(copy_stream_, job.ready, 0) != hipSuccess ||
 +                 (job.bytes != 0 &&
 +                  !StageIntoWindow(SendWindow(job.operation_id), job.data,
-+                                   job.fp32_bytes, job.wire,
-+                                   job.operation_id, copy_stream_)) ||
++                                   job.fp32_bytes, job.wire, job.operation_id,
++                                   copy_stream_)) ||
 +                 hipStreamSynchronize(copy_stream_) != hipSuccess) {
 +        finished.error = "HIP device-to-host overlapped staging failed";
 +      } else if (!WriteFrame(job.scope_id, job.operation_id, job.bytes,
@@ -2367,8 +3582,8 @@ index 0000000..a03dfb1
 +  /// blocking-read parking semantics are unchanged — the request size
 +  /// is what keeps the driver's receive path in its bulk shape.
 +  [[nodiscard]] bool ReadFrameBuffered(const Expected& expected,
-+                                        std::uint8_t* window,
-+                                        std::size_t frame_bytes) {
++                                       std::uint8_t* window,
++                                       std::size_t frame_bytes) {
 +    void* failure = nullptr;
 +    const auto spin_deadline =
 +        std::chrono::steady_clock::now() + kExchangeSpinWindow;
@@ -2567,11 +3782,11 @@ index 0000000..a03dfb1
 +    // join calls pthread_detach on the reaped thread and THROWS ESRCH,
 +    // which in a noexcept path became std::terminate/SIGABRT after every
 +    // fully-successful run) and the descriptor is left to process exit.
-+    struct timespec deadline {};
++    struct timespec deadline{};
 +    clock_gettime(CLOCK_REALTIME, &deadline);
 +    deadline.tv_sec += 2;
-+    reader_joined_ = ::pthread_timedjoin_np(reader_tid_, nullptr, &deadline) ==
-+                     0;
++    reader_joined_ =
++        ::pthread_timedjoin_np(reader_tid_, nullptr, &deadline) == 0;
 +    if (!reader_joined_) {
 +      (void)::pthread_detach(reader_tid_);
 +    }
@@ -2788,7 +4003,7 @@ index 386bae7..a7360df 100644
      return finished.peer;
    }
 diff --git a/tests/models/qwen38_flash_next/CMakeLists.txt b/tests/models/qwen38_flash_next/CMakeLists.txt
-index 6ee40b2..2609257 100644
+index 6ee40b2..9d8edd9 100644
 --- a/tests/models/qwen38_flash_next/CMakeLists.txt
 +++ b/tests/models/qwen38_flash_next/CMakeLists.txt
 @@ -50,9 +50,9 @@ if (ENGINE_ENABLE_HIP)
@@ -2804,6 +4019,81 @@ index 6ee40b2..2609257 100644
      add_executable(qwen38_flash_next_tp_batched_probe EXCLUDE_FROM_ALL
        tp_batched_probe.cpp)
      target_link_libraries(qwen38_flash_next_tp_batched_probe PRIVATE
+@@ -69,7 +69,14 @@ if (ENGINE_ENABLE_HIP)
+     gufo_qwen38_flash_next hip::host)
+ 
+   add_executable(qwen38_flash_next_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp
+-    mtp_audit.cpp)
++    mtp_audit.cpp gpu_probe_sqrtf_shim.cpp)
+   target_link_libraries(qwen38_flash_next_gpu_probe PRIVATE
+     gufo_qwen38_flash_next_reference)
++
++  # Single-host prefill timing: the batched probe's Session::Sync path and
++  # synthetic prompt, without a transport.
++  add_executable(qwen38_flash_next_prefill_probe EXCLUDE_FROM_ALL
++    prefill_probe.cpp)
++  target_link_libraries(qwen38_flash_next_prefill_probe PRIVATE
++    gufo_qwen38_flash_next hip::host)
+ endif()
+diff --git a/tests/models/qwen38_flash_next/gdn_ops_test.cpp b/tests/models/qwen38_flash_next/gdn_ops_test.cpp
+index 27ed941..2313ebc 100644
+--- a/tests/models/qwen38_flash_next/gdn_ops_test.cpp
++++ b/tests/models/qwen38_flash_next/gdn_ops_test.cpp
+@@ -18,14 +18,11 @@ namespace q = gufo::models::qwen38_flash_next::rocm;
+ namespace {
+ 
+ // The model's linear-attention geometry: 16 key heads, 48 value heads,
+-// 128-wide state, kernel-4 causal conv.
++// 128-wide state, kernel-4 causal conv. A TP2 rank splits both (8 key,
++// 24 value), which the row-split launch covers with finer blocks.
+ 
+-constexpr std::uint32_t kKHeads = 16;
+-constexpr std::uint32_t kVHeads = 48;
+ constexpr std::uint32_t kDim = 128;
+ constexpr std::uint32_t kKernel = 4;
+-constexpr std::uint32_t kChannels = 2 * kKHeads * kDim + kVHeads * kDim;
+-constexpr std::uint32_t kZ = kVHeads * kDim;
+ constexpr float kEps = 1e-6F;
+ 
+ void CheckHip(hipError_t error, const char* operation) {
+@@ -126,7 +123,10 @@ double WorstOverRms(const std::vector<float>& reference,
+   return worst / std::sqrt(ss / static_cast<double>(reference.size()));
+ }
+ 
+-int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
++int RunCase(std::uint32_t kTokens, bool extreme_gates = false,
++            std::uint32_t kKHeads = 16, std::uint32_t kVHeads = 48) {
++  const std::uint32_t kChannels = 2 * kKHeads * kDim + kVHeads * kDim;
++  const std::uint32_t kZ = kVHeads * kDim;
+   {
+     const std::size_t kQkvCount = static_cast<std::size_t>(kTokens) * kChannels;
+     const std::size_t kStateCount =
+@@ -415,7 +415,7 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
+ 
+       // The PLE convolution has a dilated history and the same prefix contract.
+       constexpr std::uint32_t kDilation = 2;
+-      constexpr std::size_t kPleHistory = (kKernel - 1) * kDilation * kChannels;
++      const std::size_t kPleHistory = (kKernel - 1) * kDilation * kChannels;
+       const auto ple_history = MakeValues(kPleHistory, 0x12873491U, 1.0F);
+       HipBuffer<float> ple_current(kPleHistory), ple_scratch(kPleHistory);
+       HipBuffer<float> ple_out(kQkvCount),
+@@ -580,6 +580,16 @@ int main() {
+     }
+     if (RunCase(1, true) != 0 || RunCase(8, true) != 0)
+       return 1;
++    // A TP2 rank's geometry (8 key, 24 value heads) dispatches the finer
++    // row-split launch; the same exactness contract covers it.
++    for (std::uint32_t n : {1u, 8u, 37u, 99u}) {
++      std::cout << "n=" << n << " tp2 geometry\n";
++      if (RunCase(n, false, 8, 24) != 0) {
++        return 1;
++      }
++    }
++    if (RunCase(8, true, 8, 24) != 0)
++      return 1;
+     return 0;
+   } catch (const std::exception& error) {
+     std::cerr << error.what() << '\n';
 diff --git a/tests/models/qwen38_flash_next/gpu_probe.cpp b/tests/models/qwen38_flash_next/gpu_probe.cpp
 index eec864e..b8d1b94 100644
 --- a/tests/models/qwen38_flash_next/gpu_probe.cpp
@@ -2934,11 +4224,556 @@ index eec864e..b8d1b94 100644
      return 2;
  #endif
    }
+diff --git a/tests/models/qwen38_flash_next/gpu_probe_sqrtf_shim.cpp b/tests/models/qwen38_flash_next/gpu_probe_sqrtf_shim.cpp
+new file mode 100644
+index 0000000..ab98fb8
+--- /dev/null
++++ b/tests/models/qwen38_flash_next/gpu_probe_sqrtf_shim.cpp
+@@ -0,0 +1,8 @@
++// Link workaround for the diagnostic gpu_probe target only: the Nix
++// toolchain's libm requires GLIBC_2.43's sqrtf, which the runtime's older
++// glibc cannot satisfy. Resolving sqrtf to the compiler builtin removes the
++// versioned symbol reference; the probe's own use is a scalar summary
++// statistic. Not production code.
++extern "C" float sqrtf(float x) {
++  return __builtin_sqrtf(x);
++}
+diff --git a/tests/models/qwen38_flash_next/hc_mix_ops_test.cpp b/tests/models/qwen38_flash_next/hc_mix_ops_test.cpp
+index 7b51436..6ca7f05 100644
+--- a/tests/models/qwen38_flash_next/hc_mix_ops_test.cpp
++++ b/tests/models/qwen38_flash_next/hc_mix_ops_test.cpp
+@@ -89,6 +89,123 @@ std::vector<float> Download(HipBuffer<float>* source, std::size_t count) {
+   return values;
+ }
+ 
++// The paired-prefill fused peer combine must equal the unfused peer add
++// followed by the combine, bit for bit, on every output it writes: the
++// residual, the norm (F16 and float routes), the tiled Q8 bytes and the
++// optional summed block row. The gamma-less tail is covered too.
++void CheckFusedPeerCombine(std::uint32_t tokens) {
++  constexpr float kEps = 1e-6F;
++  constexpr std::size_t kHcDim = kStreams * kHidden;
++  const std::size_t rows = static_cast<std::size_t>(tokens) * kHcDim;
++  const std::size_t mixed = static_cast<std::size_t>(tokens) * kHidden;
++  const auto res = MakeValues(rows, 0x0F0F0F0FU, 1.0F);
++  const auto local = MakeValues(mixed, 0x12340001U, 1.0F);
++  const auto peer = MakeValues(mixed, 0x12340002U, 1.0F);
++  const auto gamma = MakeValues(kHcDim, 0x600DCAFEU, 0.5F);
++  const std::uint32_t parts = q::HcInjectPartsVec4(kHidden);
++  const auto inject = MakeValues(
++      static_cast<std::size_t>(tokens) * kStreams * parts, 0xDEADBEEFU, 0.1F);
++  const std::size_t q8_bytes = q::Q8TiledBytes(tokens, kHcDim);
++  for (int variant = 0; variant < 3; ++variant) {
++    const bool f16 = variant != 2;
++    const bool with_gamma = variant != 1;
++    HipBuffer<float> d_res_a(rows), d_res_b(rows);
++    HipBuffer<float> d_block(mixed), d_local(mixed), d_peer(mixed);
++    HipBuffer<float> d_summed(mixed), d_summed_ref(mixed);
++    HipBuffer<float> d_gamma(kHcDim);
++    HipBuffer<float> d_inject(inject.size());
++    HipBuffer<float> d_xn_ref(rows), d_xn_fused(rows);
++    HipBuffer<__half> d_xn_half_ref(rows), d_xn_half(rows);
++    HipBuffer<std::uint8_t> d_q8_ref(q8_bytes), d_q8(q8_bytes);
++    Upload(&d_res_a, res);
++    Upload(&d_res_b, res);
++    Upload(&d_local, local);
++    Upload(&d_peer, peer);
++    Upload(&d_gamma, gamma);
++    Upload(&d_inject, inject);
++    CheckHip(hipMemset(d_q8_ref.get(), 0, q8_bytes), "clear reference Q8");
++    CheckHip(hipMemset(d_q8.get(), 0, q8_bytes), "clear fused Q8");
++    // A gamma-less combine writes no norm; both buffers start zeroed so the
++    // byte comparison covers that case too.
++    CheckHip(hipMemset(d_xn_half_ref.get(), 0, d_xn_half_ref.bytes()),
++             "clear reference F16 norm");
++    CheckHip(hipMemset(d_xn_half.get(), 0, d_xn_half.bytes()),
++             "clear fused F16 norm");
++    CheckHip(hipMemset(d_xn_ref.get(), 0, d_xn_ref.bytes()),
++             "clear reference float norm");
++    CheckHip(hipMemset(d_xn_fused.get(), 0, d_xn_fused.bytes()),
++             "clear fused float norm");
++    // Reference: add the peer into a copy of the local partial, then the
++    // unfused combine.
++    CheckHip(hipMemcpy(d_block.get(), d_local.get(), d_block.bytes(),
++                       hipMemcpyDeviceToDevice),
++             "copy local partial");
++    CheckHip(hipMemcpy(d_summed_ref.get(), d_local.get(), d_summed_ref.bytes(),
++                       hipMemcpyDeviceToDevice),
++             "copy local partial for the summed reference");
++    q::AddRowsBroadcast(d_peer.get(), d_block.get(), tokens, kHidden, 1,
++                        nullptr);
++    q::AddRowsBroadcast(d_peer.get(), d_summed_ref.get(), tokens, kHidden, 1,
++                        nullptr);
++    if (f16) {
++      q::HcCombineF16(d_res_a.get(), d_block.get(), d_inject.get(), parts,
++                      with_gamma ? d_gamma.get() : nullptr, d_xn_half_ref.get(),
++                      d_q8_ref.get(), tokens, kHidden, kStreams, kEps, nullptr);
++      if (!q::HcCombinePeerF16(d_res_b.get(), d_local.get(), d_peer.get(),
++                               d_summed.get(), d_inject.get(), parts,
++                               with_gamma ? d_gamma.get() : nullptr,
++                               d_xn_half.get(), d_q8.get(), tokens, kHidden,
++                               kStreams, kEps, nullptr)) {
++        throw std::runtime_error("fused peer combine rejected the geometry");
++      }
++    } else {
++      q::HcCombine(d_res_a.get(), d_block.get(), d_inject.get(), parts,
++                   with_gamma ? d_gamma.get() : nullptr, d_xn_ref.get(), tokens,
++                   kHidden, kStreams, kEps, nullptr);
++      if (!q::HcCombinePeer(
++              d_res_b.get(), d_local.get(), d_peer.get(), d_summed.get(),
++              d_inject.get(), parts, with_gamma ? d_gamma.get() : nullptr,
++              d_xn_fused.get(), tokens, kHidden, kStreams, kEps, nullptr)) {
++        throw std::runtime_error("fused peer combine rejected the geometry");
++      }
++    }
++    // An observer that wants the summed row in the block buffer itself
++    // must be refused: every stream re-reads that row, so an in-place sum
++    // would add the peer again.
++    if (q::HcCombinePeerF16(d_res_b.get(), d_local.get(), d_peer.get(),
++                            d_local.get(), d_inject.get(), parts, d_gamma.get(),
++                            d_xn_half.get(), d_q8.get(), tokens, kHidden,
++                            kStreams, kEps, nullptr) ||
++        q::HcCombinePeer(d_res_b.get(), d_local.get(), d_peer.get(),
++                         d_local.get(), d_inject.get(), parts, d_gamma.get(),
++                         d_xn_fused.get(), tokens, kHidden, kStreams, kEps,
++                         nullptr)) {
++      throw std::runtime_error("fused peer combine accepted an aliasing sum");
++    }
++    CheckHip(hipDeviceSynchronize(), "fused peer combine synchronization");
++    const auto exact = [&](auto& a, auto& b, const char* what) {
++      std::vector<std::uint8_t> x(a.bytes()), y(b.bytes());
++      CheckHip(hipMemcpy(x.data(), a.get(), x.size(), hipMemcpyDeviceToHost),
++               "reference download");
++      CheckHip(hipMemcpy(y.data(), b.get(), y.size(), hipMemcpyDeviceToHost),
++               "fused download");
++      if (x != y) {
++        throw std::runtime_error(std::string("fused peer combine changed ") +
++                                 what);
++      }
++    };
++    exact(d_res_a, d_res_b, "the residual");
++    exact(d_summed_ref, d_summed, "the summed block row");
++    if (f16) {
++      exact(d_xn_half_ref, d_xn_half, "the F16 norm");
++      exact(d_q8_ref, d_q8, "the tiled Q8 norm");
++    } else {
++      exact(d_xn_ref, d_xn_fused, "the float norm");
++    }
++  }
++  std::cerr << "HC fused peer combine exact at " << tokens << " tokens\n";
++}
++
+ // Fusing the projection must preserve every downstream representation,
+ // including the inject partials' reduction order and quantization ties.
+ void CheckFusedProjection(std::uint32_t tokens) {
+@@ -180,12 +297,107 @@ void CheckFusedProjection(std::uint32_t tokens) {
+   std::cerr << "HC projection fusion exact at " << tokens << " tokens\n";
+ }
+ 
++// A combine that emits the next mixer's inject partials must match the
++// unfused sequence — the combine's own outputs unchanged, and the emitted
++// partials byte-identical to HcInjectPartialF16 over the combine's F16 norm
++// — on the plain and peer routes, including the production case where the
++// emitted partials alias the consumed logits.
++void CheckCombineInjectEmission(std::uint32_t tokens) {
++  constexpr float kEps = 1e-6F;
++  constexpr std::size_t kHcDim = kStreams * kHidden;
++  const std::size_t rows = static_cast<std::size_t>(tokens) * kHcDim;
++  const std::size_t mixed = static_cast<std::size_t>(tokens) * kHidden;
++  const std::uint32_t parts = q::HcInjectPartsVec4(kHidden);
++  const std::size_t inject_count =
++      static_cast<std::size_t>(tokens) * kStreams * parts;
++  const std::size_t q8_bytes = q::Q8TiledBytes(tokens, kHcDim);
++  const auto res = MakeValues(rows, 0x0F0F0F0FU, 1.0F);
++  const auto block = MakeValues(mixed, 0x12340001U, 1.0F);
++  const auto peer = MakeValues(mixed, 0x12340002U, 1.0F);
++  const auto gamma = MakeValues(kHcDim, 0x600DCAFEU, 0.5F);
++  const auto inject_w = MakeValues(kStreams * kHcDim, 0xDEADBEEFU, 0.1F);
++  const auto logits = MakeValues(inject_count, 0xFEEDF00DU, 0.1F);
++  for (int variant = 0; variant < 2; ++variant) {
++    const bool peer_route = variant == 1;
++    for (int aliased = 0; aliased < 2; ++aliased) {
++      HipBuffer<float> d_res_a(rows), d_res_b(rows);
++      HipBuffer<float> d_block(mixed), d_peer(mixed), d_summed(mixed);
++      HipBuffer<float> d_gamma(kHcDim), d_weight(kStreams * kHcDim);
++      HipBuffer<float> d_logits(inject_count), d_logits_b(inject_count);
++      HipBuffer<float> d_inject_ref(inject_count), d_inject_fused(inject_count);
++      HipBuffer<__half> d_xn_ref(rows), d_xn_fused(rows);
++      HipBuffer<std::uint8_t> d_q8_ref(q8_bytes), d_q8_fused(q8_bytes);
++      Upload(&d_res_a, res);
++      Upload(&d_res_b, res);
++      Upload(&d_block, block);
++      Upload(&d_peer, peer);
++      Upload(&d_gamma, gamma);
++      Upload(&d_weight, inject_w);
++      Upload(&d_logits, logits);
++      Upload(&d_logits_b, logits);
++      CheckHip(hipMemset(d_q8_ref.get(), 0, q8_bytes), "clear reference Q8");
++      CheckHip(hipMemset(d_q8_fused.get(), 0, q8_bytes), "clear fused Q8");
++      // Reference: the unfused combine, then the separate inject pass over
++      // the F16 norm it wrote.
++      if (!peer_route) {
++        q::HcCombineF16(d_res_a.get(), d_block.get(), d_logits.get(), parts,
++                        d_gamma.get(), d_xn_ref.get(), d_q8_ref.get(), tokens,
++                        kHidden, kStreams, kEps, nullptr);
++      } else if (!q::HcCombinePeerF16(d_res_a.get(), d_block.get(),
++                                      d_peer.get(), d_summed.get(),
++                                      d_logits.get(), parts, d_gamma.get(),
++                                      d_xn_ref.get(), d_q8_ref.get(), tokens,
++                                      kHidden, kStreams, kEps, nullptr)) {
++        throw std::runtime_error("peer combine rejected the geometry");
++      }
++      q::HcInjectPartialF16(d_xn_ref.get(), d_weight.get(), d_inject_ref.get(),
++                            tokens, kHidden, nullptr);
++      // Fused: the emitting combine, with the emitted partials optionally
++      // aliasing the consumed logits buffer (the production layout).
++      float* inject_out = aliased ? d_logits_b.get() : d_inject_fused.get();
++      if (!peer_route) {
++        q::HcCombineF16(d_res_b.get(), d_block.get(), d_logits_b.get(), parts,
++                        d_gamma.get(), d_xn_fused.get(), d_q8_fused.get(),
++                        tokens, kHidden, kStreams, kEps, nullptr,
++                        d_weight.get(), inject_out);
++      } else if (!q::HcCombinePeerF16(
++                     d_res_b.get(), d_block.get(), d_peer.get(), d_summed.get(),
++                     d_logits_b.get(), parts, d_gamma.get(), d_xn_fused.get(),
++                     d_q8_fused.get(), tokens, kHidden, kStreams, kEps, nullptr,
++                     d_weight.get(), inject_out)) {
++        throw std::runtime_error("emitting peer combine rejected the geometry");
++      }
++      CheckHip(hipDeviceSynchronize(), "inject emission synchronization");
++      const auto exact = [&](auto& a, auto& b, const char* what) {
++        std::vector<std::uint8_t> x(a.bytes()), y(b.bytes());
++        CheckHip(hipMemcpy(x.data(), a.get(), x.size(), hipMemcpyDeviceToHost),
++                 "reference download");
++        CheckHip(hipMemcpy(y.data(), b.get(), y.size(), hipMemcpyDeviceToHost),
++                 "fused download");
++        if (x != y) {
++          throw std::runtime_error(std::string("inject emission changed ") +
++                                   what);
++        }
++      };
++      exact(d_res_a, d_res_b, "the residual");
++      exact(d_xn_ref, d_xn_fused, "the F16 norm");
++      exact(d_q8_ref, d_q8_fused, "the tiled Q8 norm");
++      exact(d_inject_ref, aliased ? d_logits_b : d_inject_fused,
++            "the emitted inject partials");
++    }
++  }
++  std::cerr << "HC combine inject emission exact at " << tokens << " tokens\n";
++}
+ }  // namespace
+ 
+ int main() {
+   try {
+     CheckFusedProjection(96);
+     CheckFusedProjection(2049);
++    CheckFusedPeerCombine(37);
++    CheckFusedPeerCombine(2048);
++    CheckCombineInjectEmission(37);
++    CheckCombineInjectEmission(2048);
+     constexpr std::size_t kHcDim = static_cast<std::size_t>(kHidden) * kStreams;
+     constexpr std::size_t kRows = static_cast<std::size_t>(kTokens) * kHcDim;
+     constexpr std::size_t kMixed = static_cast<std::size_t>(kTokens) * kHidden;
+diff --git a/tests/models/qwen38_flash_next/prefill_probe.cpp b/tests/models/qwen38_flash_next/prefill_probe.cpp
+new file mode 100644
+index 0000000..33948b4
+--- /dev/null
++++ b/tests/models/qwen38_flash_next/prefill_probe.cpp
+@@ -0,0 +1,253 @@
++// Single-host prefill timing probe: the same Session::Sync prefill path the
++// two-host batched probe drives, without a transport, scheduler or HTTP.
++//
++// qwen38_flash_next_prefill_probe --model FIRST_SHARD.gguf \
++//   --prompt-tokens N [--context N] [--repeat R] [--mtp-model MTP.gguf]
++//   [--warmup-tokens N]
++//
++// `--prompt-tokens` synthesizes the same deterministic low-band token walk as
++// the batched probe's `--prompt-tokens-0` (member 0), so a single-host run and
++// a two-host run prefill the same ids through the same session code. One
++// warmup prefill (default 4096 tokens, the chunk width) grows the GEMM tier's
++// arena before the timed repeats; every repeat prefills a fresh session, so
++// no repeat reuses another's prefix. With `--mtp-model` the session runs in
++// speculative mode and the prefill pays the draft block's catch-up, matching
++// the serving configuration.
++//
++// EXIT REASONS
++//   0  every repeat prefilled successfully
++//   1  model, session or prefill failure
++//   2  argument failure
++#include <algorithm>
++#include <chrono>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <limits>
++#include <memory>
++#include <span>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "src/core/session_mode.hpp"
++#include "src/models/qwen38_flash_next/engine.hpp"
++
++namespace q = gufo::models::qwen38_flash_next;
++
++namespace {
++
++/// The batched probe's synthetic-walk constants (member 0), so both probes
++/// prefill byte-identical token sequences from the same count.
++constexpr std::int32_t kSyntheticFirstToken = 1;
++constexpr std::size_t kSyntheticStride = 5;
++constexpr std::size_t kSyntheticSpan = 512;
++
++const std::chrono::steady_clock::time_point kProbeStart =
++    std::chrono::steady_clock::now();
++
++void Say(const std::string& line) {
++  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                      std::chrono::steady_clock::now() - kProbeStart)
++                      .count();
++  std::printf("[prefill-probe t=%lldms] %s\n", static_cast<long long>(ms),
++              line.c_str());
++  std::fflush(stdout);
++}
++
++void Warn(const std::string& line) {
++  std::fprintf(stderr, "[prefill-probe] %s\n", line.c_str());
++  std::fflush(stderr);
++}
++
++/// Exactly `count` ids walked from kSyntheticFirstToken with
++/// kSyntheticStride across the first kSyntheticSpan ids of the vocabulary,
++/// stepping over stop ids: the batched probe's member-0 prompt.
++std::vector<std::int32_t> SyntheticPrompt(const q::Model& model,
++                                          std::size_t count) {
++  const std::size_t vocab = model.VocabSize();
++  if (vocab <= static_cast<std::size_t>(kSyntheticFirstToken)) {
++    return {};
++  }
++  const std::size_t span = std::min(kSyntheticSpan, vocab - 1);
++  std::vector<std::int32_t> tokens;
++  tokens.reserve(count);
++  for (std::size_t index = 0; index < count; ++index) {
++    std::size_t id = kSyntheticFirstToken + (index * kSyntheticStride) % span;
++    while (id + 1 < vocab && model.IsStopToken(static_cast<std::int32_t>(id))) {
++      ++id;
++    }
++    tokens.push_back(static_cast<std::int32_t>(id));
++  }
++  return tokens;
++}
++
++bool ParseSize(std::string_view text, std::size_t* value) {
++  if (text.empty()) {
++    return false;
++  }
++  std::size_t parsed = 0;
++  for (const char c : text) {
++    if (c < '0' || c > '9' ||
++        parsed > std::numeric_limits<std::size_t>::max() / 10) {
++      return false;
++    }
++    parsed = parsed * 10 + static_cast<std::size_t>(c - '0');
++  }
++  *value = parsed;
++  return true;
++}
++
++void Usage() {
++  std::puts(R"(Single-host prefill timing probe for Flash-Next.
++
++Usage:
++  qwen38_flash_next_prefill_probe --model FIRST_SHARD.gguf --prompt-tokens N
++                                  [--context N] [--repeat R]
++                                  [--mtp-model MTP.gguf] [--warmup-tokens N]
++
++Prefills the same synthetic token walk the two-host batched probe uses for
++member 0, through the same Session::Sync path, once per --repeat after one
++warmup prefill. Prints per-repeat prefill_ms and tokens/s.
++
++Options:
++  --model PATH         First GGUF shard, required; with --mtp-model the trunk
++                       of the pair, as serving loads it
++  --prompt-tokens N    Synthesize the prompt as exactly N token ids (required)
++  --context N          Session context (default 65536)
++  --repeat R           Timed fresh-session prefills (default 3)
++  --warmup-tokens N    Untimed warmup prompt length, 0 disables (default 4096)
++  --mtp-model PATH     MTP sidecar; the session runs speculative and prefill
++                       pays the draft block's catch-up
++
++Exit reasons:
++  0 the repeats prefilled successfully   1 failure   2 arguments)");
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  std::string model_path;
++  std::string mtp_path;
++  std::size_t prompt_tokens = 0;
++  std::size_t context = 65536;
++  std::size_t repeat = 3;
++  std::size_t warmup_tokens = 4096;
++
++  for (int i = 1; i < argc; ++i) {
++    const std::string arg = argv[i];
++    const auto next = [&]() -> std::string {
++      return i + 1 < argc ? argv[++i] : std::string();
++    };
++    if (arg == "--help" || arg == "-h") {
++      Usage();
++      return 0;
++    } else if (arg == "--model") {
++      model_path = next();
++    } else if (arg == "--mtp-model") {
++      mtp_path = next();
++    } else if (arg == "--prompt-tokens") {
++      if (!ParseSize(next(), &prompt_tokens)) {
++        Warn("--prompt-tokens requires an unsigned token count");
++        return 2;
++      }
++    } else if (arg == "--context") {
++      if (!ParseSize(next(), &context) || context == 0) {
++        Warn("--context requires a nonzero unsigned integer");
++        return 2;
++      }
++    } else if (arg == "--repeat") {
++      if (!ParseSize(next(), &repeat) || repeat == 0) {
++        Warn("--repeat requires a nonzero unsigned integer");
++        return 2;
++      }
++    } else if (arg == "--warmup-tokens") {
++      if (!ParseSize(next(), &warmup_tokens)) {
++        Warn("--warmup-tokens requires an unsigned integer");
++        return 2;
++      }
++    } else {
++      Warn("unknown argument: " + arg);
++      return 2;
++    }
++  }
++
++  if (model_path.empty() || prompt_tokens == 0) {
++    Warn("--model and --prompt-tokens are required; see --help");
++    return 2;
++  }
++  if (prompt_tokens >= context) {
++    Warn("--prompt-tokens " + std::to_string(prompt_tokens) +
++         " must leave room inside --context " + std::to_string(context));
++    return 2;
++  }
++
++  q::ModelOptions options{
++      .max_context = static_cast<std::uint32_t>(context),
++      .mtp_model_path = mtp_path,
++      .max_draft_tokens = q::kMaxMtpDraftTokens,
++      .vision_model_path = "",
++      .decode_concurrency = 1,
++      .tp_rank = 0,
++      .tp_world_size = 1,
++      .hip_device = 0,
++      .communicator = nullptr,
++  };
++  std::string error;
++  auto model = q::Model::Load(model_path, options, &error);
++  if (!model) {
++    Warn("model load failed: " + error);
++    return 1;
++  }
++  if (!mtp_path.empty() && !model->HasMtp()) {
++    Warn("the model reports no MTP sidecar despite --mtp-model");
++    return 1;
++  }
++  const gufo::core::SessionMode mode =
++      mtp_path.empty() ? gufo::core::SessionMode::kAutoregressive
++                       : gufo::core::SessionMode::kSpeculative;
++  Say(std::string("model loaded, mtp=") + (mtp_path.empty() ? "off" : "on") +
++      ", prefill_capacity=" + std::to_string(model->PrefillCapacity()) +
++      " context=" + std::to_string(context));
++
++  if (warmup_tokens != 0 && warmup_tokens < context) {
++    auto session =
++        model->CreateSession(mode, static_cast<std::uint32_t>(context), &error);
++    if (!session ||
++        !session->Sync(SyntheticPrompt(*model, warmup_tokens), &error)) {
++      Warn("warmup prefill failed: " + error);
++      return 1;
++    }
++    Say("warmup complete: " + std::to_string(warmup_tokens) + " tokens");
++  }
++
++  const std::vector<std::int32_t> prompt =
++      SyntheticPrompt(*model, prompt_tokens);
++  if (prompt.size() != prompt_tokens) {
++    Warn("synthetic prompt came out empty; the vocabulary is unusable");
++    return 1;
++  }
++  for (std::size_t r = 0; r < repeat; ++r) {
++    auto session =
++        model->CreateSession(mode, static_cast<std::uint32_t>(context), &error);
++    if (!session) {
++      Warn("session creation failed: " + error);
++      return 1;
++    }
++    const auto start = std::chrono::steady_clock::now();
++    if (!session->Sync(prompt, &error)) {
++      Warn("repeat " + std::to_string(r) + " prefill failed: " + error);
++      return 1;
++    }
++    const double ms = std::chrono::duration<double, std::milli>(
++                          std::chrono::steady_clock::now() - start)
++                          .count();
++    char timing[160];
++    std::snprintf(timing, sizeof(timing),
++                  "repeat=%zu tokens=%zu prefill_ms=%.1f tokens_per_s=%.1f", r,
++                  prompt_tokens, ms,
++                  ms <= 0.0 ? 0.0 : prompt_tokens * 1000.0 / ms);
++    Say(timing);
++  }
++  return 0;
++}
+diff --git a/tests/models/qwen38_flash_next/projection_ops_test.cpp b/tests/models/qwen38_flash_next/projection_ops_test.cpp
+index 2cfd4f5..ed2edef 100644
+--- a/tests/models/qwen38_flash_next/projection_ops_test.cpp
++++ b/tests/models/qwen38_flash_next/projection_ops_test.cpp
+@@ -864,6 +864,9 @@ int main() {
+     ok = Run(200, 200, 6144, 0xDEADBEEFU) < 1e-2 && ok;
+     ok = Run(1025, 2560, 6144, 0x51A17U, 2) < 1e-2 && ok;
+     ok = Run(2049, 2560, 6144, 0x25606144U, 2) < 1e-2 && ok;
++    // A TP2 rank's output projection: the halved-activation shape.
++    ok = Run(1025, 2560, 3072, 0x3072A25U, 2) < 1e-2 && ok;
++    ok = Run(2049, 2560, 3072, 0x25603072U, 2) < 1e-2 && ok;
+     // Wide SSM projection: two K blocks per stage, with a partial token tile.
+     ok = Run(2049, 16384, 2560, 0x16384256U, 2) < 1e-2 && ok;
+     // A TP rank's GDN heads: 8 key and 24 value heads.
 diff --git a/tests/models/qwen38_flash_next/tp_batched_probe.cpp b/tests/models/qwen38_flash_next/tp_batched_probe.cpp
-index 3327b02..049199c 100644
+index 3327b02..b4c4bba 100644
 --- a/tests/models/qwen38_flash_next/tp_batched_probe.cpp
 +++ b/tests/models/qwen38_flash_next/tp_batched_probe.cpp
-@@ -56,8 +56,14 @@
+@@ -10,9 +10,11 @@
+ // makes for single-token decoders; `--serial` advances them one at a time with
+ // `Session::Evaluate`, as a lone decoder does. No control channel, scheduler
+ // or executor is involved, and each rank samples its own logits, so the ranks
+-// agree only if they compute the same logits. Each rank prints the member set
+-// and logit hashes of every step and each member's tokens and checksum; diff
+-// the two ranks' logs, and a batched run against a serial one.
++// agree only if they compute the same logits. An untimed warmup prefill
++// precedes the timed loop, so the reported prefill rate is a steady-state
++// figure rather than this process's first prefill. Each rank prints the
++// member set and logit hashes of every step and each member's tokens and
++// checksum; diff the two ranks' logs, and a batched run against a serial one.
+ //
+ // `--moe-input-hashes` hashes every MoE input during prefill, to find the
+ // first layer at which the ranks diverge. `--allreduce-bench N` loads no model
+@@ -50,14 +52,21 @@
+ #include <sstream>
+ #include <string>
+ #include <string_view>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
  #include "src/core/sampling.hpp"
  #include "src/core/session_mode.hpp"
  #include "src/models/qwen38_flash_next/engine.hpp"
@@ -2953,7 +4788,7 @@ index 3327b02..049199c 100644
  
  namespace q = gufo::models::qwen38_flash_next;
  
-@@ -172,9 +178,11 @@ Options (the same on both ranks unless noted):
+@@ -172,9 +181,11 @@ Options (the same on both ranks unless noted):
    --tp-rank 0|1           This rank. Required.
    --tp-bootstrap-host HOST  Rank 0's address; required on rank 1. Rank 0
                            listens on all interfaces.
@@ -2966,7 +4801,19 @@ index 3327b02..049199c 100644
    --model PATH            First GGUF shard, required; a model without an MTP
                            sidecar
    --context N             Context (default 4096)
-@@ -290,12 +298,13 @@ public:
+@@ -191,6 +202,11 @@ Options (the same on both ranks unless noted):
+                           exercised with an exact token count. Refused together
+                           with --prompt-0 or --prompt-file-0.
+   --prompt-tokens-1 N     The same for member 1.
++  --mtp-model PATH        MTP sidecar; sessions decode speculatively through
++                          DecodeStep, one member at a time (greedy output
++                          must equal the AR decode). Prefill pays the draft
++                          block's catch-up, as serving does. Not with
++                          --serial.
+   --help                  This text
+ 
+ Limits:
+@@ -290,12 +306,13 @@ public:
    }
    [[nodiscard]] const float* ExchangePartial(const float* data,
                                               std::size_t bytes,
@@ -2981,7 +4828,7 @@ index 3327b02..049199c 100644
    }
    [[nodiscard]] bool StartPartial(const float* data, std::size_t bytes,
                                    hipStream_t stream,
-@@ -306,8 +315,9 @@ public:
+@@ -306,8 +323,9 @@ public:
      return inner_->StartPartial(data, bytes, stream, error);
    }
    [[nodiscard]] const float* FinishPartial(std::size_t bytes,
@@ -2992,7 +4839,23 @@ index 3327b02..049199c 100644
    }
    [[nodiscard]] bool QueuePartial(std::size_t bytes, QueuedPartial* partial,
                                    std::string* error) override {
-@@ -588,7 +598,8 @@ int RunBatched(const char* role, const std::shared_ptr<q::Model>& model,
+@@ -561,10 +579,13 @@ int RunBatched(const char* role, const std::shared_ptr<q::Model>& model,
+   constexpr std::uint64_t kBatchedScope = 1;
+ 
+   const std::size_t width = prompt.size();
++  const bool speculative = model->HasMtp();
++  const gufo::core::SessionMode mode =
++      speculative ? gufo::core::SessionMode::kSpeculative
++                  : gufo::core::SessionMode::kAutoregressive;
+   std::vector<std::unique_ptr<q::Session>> session(width);
+   for (std::size_t index = 0; index < width; ++index) {
+-    session[index] = model->CreateSession(
+-        gufo::core::SessionMode::kAutoregressive, context, error);
++    session[index] = model->CreateSession(mode, context, error);
+     if (!session[index]) {
+       return kTransportFailure;
+     }
+@@ -588,10 +609,43 @@ int RunBatched(const char* role, const std::shared_ptr<q::Model>& model,
    // A zero-byte exchange is a barrier: the ranks load the model at different
    // speeds, and without it the first prefill exchange would bill the slower
    // load to the faster rank's prefill time.
@@ -3002,7 +4865,264 @@ index 3327b02..049199c 100644
      Warn(std::string(role) + " pre-prefill barrier failed: " + *error);
      return kTransportFailure;
    }
-@@ -884,6 +895,8 @@ int main(int argc, char** argv) {
++  // An untimed warmup prefill grows the GEMM tier's arena, faults the
++  // exchange windows and starts the transport's worker threads inside this
++  // process, so the timed loop measures steady-state prefill instead of
++  // first-touch costs (a cold first prefill varied by ±5 % between process
++  // launches here). Both ranks run the same warmup, so the exchange
++  // sequence stays balanced.
++  {
++    const auto warmup_tokens =
++        std::min<std::uint32_t>(model->PrefillCapacity(), context / 2);
++    auto warm = model->CreateSession(gufo::core::SessionMode::kAutoregressive,
++                                     context, error);
++    const auto warm_start = std::chrono::steady_clock::now();
++    if (!warm || warmup_tokens == 0 ||
++        !warm->Sync(SyntheticPrompt(*model, warmup_tokens, 0), error)) {
++      Warn(std::string(role) + " warmup prefill failed: " + *error);
++      return kTransportFailure;
++    }
++    const auto warm_ms = std::chrono::duration<double, std::milli>(
++                             std::chrono::steady_clock::now() - warm_start)
++                             .count();
++    Say(role, "warmup prefill complete: " + std::to_string(warmup_tokens) +
++                  " tokens in " + std::to_string(static_cast<long>(warm_ms)) +
++                  " ms (untimed)");
++    // A short pause opens a clean gap in a kernel profile between the
++    // warmup and the timed prefill (untimed region).
++    std::this_thread::sleep_for(std::chrono::milliseconds(120));
++    if (collectives->ExchangePartial(nullptr, 0, nullptr, nullptr, error) ==
++        nullptr) {
++      Warn(std::string(role) + " post-warmup barrier failed: " + *error);
++      return kTransportFailure;
++    }
++  }
+   const auto prefill_start = std::chrono::steady_clock::now();
+   if (moe_inputs != nullptr) {
+     moe_inputs->armed = true;
+@@ -650,81 +704,136 @@ int RunBatched(const char* role, const std::shared_ptr<q::Model>& model,
+   std::size_t timed_steps = 0;
+   std::size_t forwards = 0;
+   std::size_t advanced_tokens = 0;
+-  for (std::size_t step = 0; step < budget; ++step) {
+-    std::vector<q::Session::AdvanceRequest> requests(width);
+-    std::vector<std::size_t> members(width);
+-    std::size_t rows = 0;
+-    std::string included;
+-    std::string logit_hashes;
+-    for (std::size_t index = 0; index < width; ++index) {
+-      if (!trace[index].stopped_on_token &&
+-          trace[index].tokens.size() >= budget) {
+-        trace[index].stopped_on_budget = true;
++  if (speculative) {
++    // MTP decode: DecodeStep samples the anchor, drafts, verifies and
++    // commits whole accepted runs, so one step advances a member by several
++    // tokens. Greedy output must equal the AR decode of the same prompt.
++    for (std::size_t step = 0; step < budget; ++step) {
++      std::size_t rows = 0;
++      std::string included;
++      std::string logit_hashes;
++      std::string produced;
++      const auto step_start = std::chrono::steady_clock::now();
++      for (std::size_t index = 0; index < width; ++index) {
++        if (trace[index].stopped_on_token || trace[index].stopped_on_budget) {
++          continue;
++        }
++        const auto logits = session[index]->Logits();
++        if (logits.empty()) {
++          *error = "session " + std::to_string(index) +
++                   " has no logits to sample from";
++          return kTransportFailure;
++        }
++        logit_hashes += (logit_hashes.empty() ? "" : ",") +
++                        std::to_string(LogitChecksum(logits));
++        q::Session::DecodeResult result;
++        if (!session[index]->DecodeStep(budget - trace[index].tokens.size(),
++                                        *samplers[index], &result, error)) {
++          Warn(std::string(role) + " member " + std::to_string(index) +
++               " decode step failed: " + *error);
++          return kTransportFailure;
++        }
++        included += static_cast<char>('a' + index);
++        ++rows;
++        ++trace[index].decode_forwards;
++        trace[index].tokens.insert(trace[index].tokens.end(),
++                                   result.tokens.begin(), result.tokens.end());
++        advanced_tokens += result.tokens.size();
++        produced += " " + std::to_string(result.tokens.size()) + ":";
++        produced += TokenListText(result.tokens);
++        if (result.stop) {
++          trace[index].stopped_on_token = true;
++        } else if (trace[index].tokens.size() >= budget) {
++          trace[index].stopped_on_budget = true;
++        }
+       }
+-      if (trace[index].stopped_on_token || trace[index].stopped_on_budget) {
+-        continue;
++      decode_time += std::chrono::steady_clock::now() - step_start;
++      ++timed_steps;
++      forwards += rows;
++      Say(role, "mtp step " + std::to_string(step) + " members=" +
++                    (included.empty() ? std::string("none") : included) +
++                    " logits=" + logit_hashes + " tokens" + produced);
++      if (rows == 0) {
++        break;
+       }
+-      const auto logits = session[index]->Logits();
+-      if (logits.empty()) {
+-        *error = "session " + std::to_string(index) +
+-                 " has no logits to sample from";
+-        return kTransportFailure;
++    }
++  } else {
++    for (std::size_t step = 0; step < budget; ++step) {
++      std::vector<q::Session::AdvanceRequest> requests(width);
++      std::vector<std::size_t> members(width);
++      std::size_t rows = 0;
++      std::string included;
++      std::string logit_hashes;
++      for (std::size_t index = 0; index < width; ++index) {
++        if (!trace[index].stopped_on_token &&
++            trace[index].tokens.size() >= budget) {
++          trace[index].stopped_on_budget = true;
++        }
++        if (trace[index].stopped_on_token || trace[index].stopped_on_budget) {
++          continue;
++        }
++        const auto logits = session[index]->Logits();
++        if (logits.empty()) {
++          *error = "session " + std::to_string(index) +
++                   " has no logits to sample from";
++          return kTransportFailure;
++        }
++        // The logits a rank samples from: ranks that agree bit for bit here
++        // hold the same hidden state, so the first differing step localizes a
++        // numerical divergence even before any sampled token differs.
++        logit_hashes += (logit_hashes.empty() ? "" : ",") +
++                        std::to_string(LogitChecksum(logits));
++        const auto sampled =
++            static_cast<std::int32_t>(samplers[index]->Sample(logits));
++        if (model->IsStopToken(sampled)) {
++          trace[index].stopped_on_token = true;
++          continue;
++        }
++        trace[index].tokens.push_back(sampled);
++        if (trace[index].tokens.size() >= budget) {
++          trace[index].stopped_on_budget = true;
++          continue;
++        }
++        requests[rows] = q::Session::AdvanceRequest{
++            .session = session[index].get(),
++            .token = sampled,
++        };
++        members[rows] = index;
++        included += static_cast<char>('a' + index);
++        ++rows;
+       }
+-      // The logits a rank samples from: ranks that agree bit for bit here
+-      // hold the same hidden state, so the first differing step localizes a
+-      // numerical divergence even before any sampled token differs.
+-      logit_hashes += (logit_hashes.empty() ? "" : ",") +
+-                      std::to_string(LogitChecksum(logits));
+-      const auto sampled =
+-          static_cast<std::int32_t>(samplers[index]->Sample(logits));
+-      if (model->IsStopToken(sampled)) {
+-        trace[index].stopped_on_token = true;
+-        continue;
++      // The per-step member set is the schedule. It must be identical on both
++      // ranks, so it is logged rather than inferred.
++      Say(role, "batched step " + std::to_string(step) +
++                    " rows=" + std::to_string(rows) + " members=" +
++                    (included.empty() ? std::string("none") : included) +
++                    " logits=" + logit_hashes);
++      if (rows == 0) {
++        break;
+       }
+-      trace[index].tokens.push_back(sampled);
+-      if (trace[index].tokens.size() >= budget) {
+-        trace[index].stopped_on_budget = true;
+-        continue;
++      const auto step_start = std::chrono::steady_clock::now();
++      if (serial) {
++        for (std::size_t row = 0; row < rows; ++row) {
++          if (!requests[row].session->Evaluate(requests[row].token, error)) {
++            Warn(std::string(role) + " serial advance failed at step " +
++                 std::to_string(step) + ": " + *error);
++            return kTransportFailure;
++          }
++        }
++      } else if (!q::Session::EvaluateBatch(std::span(requests).first(rows),
++                                            error)) {
++        Warn(std::string(role) + " batched advance failed at step " +
++             std::to_string(step) + ": " + *error);
++        return kTransportFailure;
+       }
+-      requests[rows] = q::Session::AdvanceRequest{
+-          .session = session[index].get(),
+-          .token = sampled,
+-      };
+-      members[rows] = index;
+-      included += static_cast<char>('a' + index);
+-      ++rows;
+-    }
+-    // The per-step member set is the schedule. It must be identical on both
+-    // ranks, so it is logged rather than inferred.
+-    Say(role, "batched step " + std::to_string(step) +
+-                  " rows=" + std::to_string(rows) + " members=" +
+-                  (included.empty() ? std::string("none") : included) +
+-                  " logits=" + logit_hashes);
+-    if (rows == 0) {
+-      break;
+-    }
+-    const auto step_start = std::chrono::steady_clock::now();
+-    if (serial) {
++      decode_time += std::chrono::steady_clock::now() - step_start;
++      ++timed_steps;
++      forwards += serial ? rows : 1;
++      advanced_tokens += rows;
++      // Only the members in this step's advance took part in a forward.
+       for (std::size_t row = 0; row < rows; ++row) {
+-        if (!requests[row].session->Evaluate(requests[row].token, error)) {
+-          Warn(std::string(role) + " serial advance failed at step " +
+-               std::to_string(step) + ": " + *error);
+-          return kTransportFailure;
+-        }
++        ++trace[members[row]].decode_forwards;
+       }
+-    } else if (!q::Session::EvaluateBatch(std::span(requests).first(rows),
+-                                          error)) {
+-      Warn(std::string(role) + " batched advance failed at step " +
+-           std::to_string(step) + ": " + *error);
+-      return kTransportFailure;
+-    }
+-    decode_time += std::chrono::steady_clock::now() - step_start;
+-    ++timed_steps;
+-    forwards += serial ? rows : 1;
+-    advanced_tokens += rows;
+-    // Only the members in this step's advance took part in a forward.
+-    for (std::size_t row = 0; row < rows; ++row) {
+-      ++trace[members[row]].decode_forwards;
+     }
+   }
+   const double decode_ms =
+@@ -736,7 +845,7 @@ int RunBatched(const char* role, const std::shared_ptr<q::Model>& model,
+                 decode_ms, timed_steps == 0 ? 0.0 : decode_ms / timed_steps,
+                 forwards == 0 ? 0.0 : decode_ms / forwards,
+                 decode_ms <= 0.0 ? 0.0 : advanced_tokens * 1000.0 / decode_ms);
+-  Say(role, std::string(serial ? "serial" : "batched") +
++  Say(role, std::string(speculative ? "mtp" : (serial ? "serial" : "batched")) +
+                 " decode: steps=" + std::to_string(timed_steps) +
+                 " forwards=" + std::to_string(forwards) + " advanced_tokens=" +
+                 std::to_string(advanced_tokens) + " " + timing);
+@@ -860,6 +969,7 @@ int RunAllReduceBench(
+ int main(int argc, char** argv) {
+   std::optional<std::uint32_t> rank;
+   std::string model_path;
++  std::string mtp_path;
+   std::string prompt[kPromptOptions] = {"The capital of France is",
+                                         "The largest planet in the solar "
+                                         "system is"};
+@@ -884,6 +994,8 @@ int main(int argc, char** argv) {
    bool moe_input_hashes = false;
    std::uint16_t bootstrap_port = 18515;
    std::string bootstrap_host;
@@ -3011,7 +5131,16 @@ index 3327b02..049199c 100644
  
    for (int i = 1; i < argc; ++i) {
      const std::string arg = argv[i];
-@@ -954,6 +967,14 @@ int main(int argc, char** argv) {
+@@ -902,6 +1014,8 @@ int main(int argc, char** argv) {
+       rank = parsed;
+     } else if (arg == "--model") {
+       model_path = next();
++    } else if (arg == "--mtp-model") {
++      mtp_path = next();
+     } else if (arg == "--max-tokens") {
+       if (!ParseUint(next(), &budget)) {
+         Warn("--max-tokens requires an unsigned integer");
+@@ -954,6 +1068,14 @@ int main(int argc, char** argv) {
          Warn("--tp-gid-index requires an unsigned integer");
          return kInvalidArguments;
        }
@@ -3026,7 +5155,7 @@ index 3327b02..049199c 100644
      } else if (arg == "--serial") {
        serial = true;
      } else if (arg == "--width") {
-@@ -1054,24 +1075,52 @@ int main(int argc, char** argv) {
+@@ -1054,24 +1176,52 @@ int main(int argc, char** argv) {
      }
    }
  
@@ -3095,6 +5224,28 @@ index 3327b02..049199c 100644
                          std::to_string(bootstrap_port));
    if (allreduce_bench != 0) {
      return RunAllReduceBench(role.c_str(), communicator, device,
+@@ -1083,7 +1233,7 @@ int main(int argc, char** argv) {
+   auto collectives = std::make_shared<CollectiveTrace>(std::move(communicator));
+   q::ModelOptions options{
+       .max_context = context,
+-      .mtp_model_path = "",
++      .mtp_model_path = mtp_path,
+       .max_draft_tokens = q::kMaxMtpDraftTokens,
+       .vision_model_path = "",
+       .decode_concurrency = 1,
+@@ -1104,8 +1254,10 @@ int main(int argc, char** argv) {
+     Warn("model load failed: " + error);
+     return kTransportFailure;
+   }
+-  if (model->HasMtp()) {
+-    Warn("the model reports an MTP sidecar, which this probe refuses");
++  if (model->HasMtp() && serial) {
++    Warn(
++        "--mtp-model decode advances members one DecodeStep at a time, so "
++        "it takes no --serial");
+     return kInvalidArguments;
+   }
+   std::vector<std::vector<std::int32_t>> prompts;
 diff --git a/tests/models/qwen38_flash_next/tp_probe.cpp b/tests/models/qwen38_flash_next/tp_probe.cpp
 index 8dfc5cb..6d139be 100644
 --- a/tests/models/qwen38_flash_next/tp_probe.cpp
