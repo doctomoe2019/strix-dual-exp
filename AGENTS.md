@@ -30,6 +30,11 @@ upstreams** we build on; we never publish to them.
 2. `git push` in this repo must update both the private server and the
    GitHub mirror. If one side rejects, fix or report it — never leave the
    two destinations diverging silently.
+3. **The GitHub `main` branch is protected** (admins included): force
+   pushes and branch deletions are rejected, and secret-scanning push
+   protection screens every push. A legitimate history rewrite requires
+   the user to lift the rule in the repo settings first — never disable
+   branch protection yourself. Normal fast-forward pushes are unaffected.
 3. **Secret scan before every push:** tracked content must contain no
    hostnames, private-infrastructure addresses (VPN/LAN/tbnet IPs of OUR
    deployment — RFC1918 example values in documentation are fine), real
