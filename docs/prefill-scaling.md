@@ -216,14 +216,21 @@ Excess decomposition (per rank, at 32 k):
    specialization) deprioritized: no mechanism that changes stage count
    addresses streaming. Revisit only with a weight-layout/streaming idea,
    which would help single-host too.
-9. **Split the replicated dense/W8A8/mix family** — see the S1 ledger
-   (docs/s1-sharding-ledger.md): the one positive-model candidate is the
-   **N-split of the fused HC mixer down** (~260 ms/rank ceiling, +1.8 %
-   e2e, bit-exact, +1.4 GB wire hidden by the existing overlap); splits
-   after the 320-wide low-rank bottleneck are bandwidth-dead, and the
-   router/indexer family needs a shape-capture pass first.
-10. Kernel-level prefill speedups help single and dual equally; they are the
-    only route to 3 k tok/s on this partition.
+9. **Split the replicated dense/W8A8/mix family — CLOSED on this transport
+   (2026-10-05).** The S1 ledger's one positive candidate (N-split of the
+   fused HC mixer down, ~260 ms ceiling) was implemented bit-exact — the
+   halves' scale/SiLU/rounding reproduce the fused epilogue exactly, with a
+   new tagged exchange in the transport for the mid-part boundary — and
+   still collapsed to **1 490 tok/s (−35 %)**: the single staging worker
+   serializes every mid-part 1.25 MB exchange behind the preceding 20 MB
+   part-boundary staging, and the host-side finish starves the stream.
+   Splits after the 320-wide low-rank bottleneck were already
+   bandwidth-dead. Revisit only after a transport redesign that
+   GPU-stages small mid-part frames (queued path for the pair loop's
+   boundary exchanges, or a second staging channel).
+10. Kernel-level prefill speedups help single and dual equally; with the
+    exchange-based routes exhausted, they are the only route to 3 k tok/s
+    on this partition.
 
 Steady-state reference @32 k after G1: ≈ 2 285 tok/s non-MTP (clean-mode
 sessions 2 262–2 291). Cumulative retained since the triage: ≈ +3 % over
@@ -233,4 +240,6 @@ Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),
 instruction-level combine tuning (H1 rejected), routed epilogue/tiling
 work (R1a + three prior rejections — the family is streaming-bound),
-GDN geometry (G1 captured the available block-parallelism).
+GDN geometry (G1 captured the available block-parallelism),
+exchange-based sharding of the replicated family (S1: bit-exact but
+transport-serialized, −35 %).

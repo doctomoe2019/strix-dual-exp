@@ -144,6 +144,35 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 00:50 S1 IMPLEMENTED + REJECTED, tree back to f61f17a (docs
+  7d6379f). The mixer-down N-split was built end-to-end and proven BIT-EXACT
+  twice (operator: HcDownHalfGemm F32-out + SiluScale + HcLoAssemble
+  narrowing == fused HcDownF16Gemm bits at 96/2049 tokens; e2e: canonical
+  member checksums through the real pair path). Required transport surgery:
+  StartTagged/FinishTaggedPartial in Communicator + tbstream (a started
+  exchange finished by payload match instead of FIFO order — needed because
+  the mixer's lo exchange interleaves with the pair loop's part-boundary
+  StartPartials; the naive FIFO acquire popped the wrong exchange and
+  poisoned with "size mismatch"). PERF COLLAPSED: 32k prefill 1490 tok/s
+  (-35%): the transport's SINGLE STAGING WORKER serializes each mid-part
+  1.25MB lo exchange behind the preceding 20MB boundary staging (~10ms),
+  and the host-side finish blocks the queue engine -> ~5ms exposed per
+  mixer x 1504 calls ~= 7s vs the 260ms GPU saving. The queued (GPU-staged)
+  path can't be used mid-pair (requires zero started exchanges). LESSON
+  (measurement): the probe's CollectiveTrace decorator must delegate new
+  transport virtuals — the first 4 "A/B" pairs were accidental A/A until a
+  profile showed 0 assembly-kernel launches; always verify a gated route
+  fires via a kernel counter, not just checksums. Ledger updated: exchange-
+  based sharding of the replicated family CLOSED on this transport until
+  small mid-part frames can be GPU-staged (pair-loop boundary exchanges ->
+  queued path, or a second staging channel). Reverted everything except the
+  knowledge; rebuilt probe md5 == probe-g1 (a9bf4547). Probe inventory:
+  probe-g1 = CURRENT tree, probe-s1 = the rejected split (md5 5fc7fa25,
+  both hosts), probe-c2 reference. Evidence: evidence/prefill-triage/
+  s1-split/ (logs incl. the 3136-exchange trace, prof-s1). REMAINING
+  LEVERS: single-host kernel-level speedups (help both) + the transport
+  staging redesign (its own project). Serve binary unchanged (f61f17a
+  code, 31127d4c — the split never reached a serve build).
 - 2026-10-05 23:30 G1 RETAINED + R1 CLOSED (gufo @ f61f17a: 40a7e82 GDN
   finer row-split + docs; serve 31127d4c deployed+smoked both hosts).
   G1: block-size-templated GdnRowSplitKernel; TP2's 24-value-head geometry

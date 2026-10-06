@@ -5,6 +5,9 @@ pass, `evidence/prefill-triage/g1-r1a/prof-g1/`). All figures per rank.
 The question: which of the un-halved "replicated" families can actually pay
 for an exchange, at what byte cost, and with what numerical contract.
 
+**Status update (2026-10-05, later): candidate 1 was implemented and
+REJECTED — see the bottom line.**
+
 ## Inventory (32 k window, per rank, post-G1 build)
 
 | Family | Kernel | ms | Notes |
@@ -20,23 +23,34 @@ today: 32.25 GB/pass at 2.11 GB/s staging, 98.5 % overlapped, GPU waits
 10.6 ms — the overlap machinery has headroom for more wire, not for more
 serial waits.
 
-## Candidate 1 — N-split the fused HC mixer down (RECOMMENDED, next batch)
+## Candidate 1 — N-split the fused HC mixer down (IMPLEMENTED, REJECTED)
 
-Each rank computes 160 of the 320 low-rank rows; the 320-row `lo` is
-all-gathered before the up projection consumes it.
+Each rank computed 160 of the 320 low-rank rows and exchanged the F32
+halves before the up projection consumed them. The arithmetic was proven
+bit-exact two ways (operator check at 96/2049 tokens; canonical member
+checksums end-to-end through the real pair path, via a new *tagged*
+start/finish exchange in the tbstream transport that interleaves with the
+part-boundary exchanges). The performance collapsed anyway:
 
-- **Saving:** the launch is `dim3(ceil(tokens/128), 5)` over 64-row tiles;
-  160 rows/rank rounds to 3 tiles of the 5 → ~40 % of 657 ms ≈ **260 ms
-  (+1.8 % e2e ceiling)**.
-- **Wire:** 2 048×160×4 B = 1.25 MB per mixer call; ×2 mixers ×36 layers
-  ×16 chunks ≈ **1.4 GB/pass, +4.4 %** over today's 32 GB — inside the
-  two-lanes-a-layer-apart overlap design.
-- **Numerics:** N-split is per-column bit-exact; the gathered `lo` is
-  byte-identical to today's, and the fused up/epilogue path is untouched.
-- **Complexity:** `HcMix` needs the pair exchange at the `lo` boundary (a
-  new wait per mixer call); staging copies +1.4 GB (copy-engine, overlapped
-  historically).
-- **Gate:** the canonical checksum set must be unchanged (bit-exact).
+- The transport stages every started exchange through **one worker
+  thread**, in start order. A mid-part 1.25 MB exchange queues behind the
+  preceding 20 MB part-boundary staging (~10 ms at 2.1 GB/s), and its
+  host-side finish blocks the queue engine (the host is what feeds the
+  stream), so each of the 1 504 mixer calls pays ~5 ms of exposed latency.
+- Measured: timed 32 k prefill **1 490 tok/s (−35 %)** against a 260 ms
+  GPU saving. The lo exchange cannot ride the queued (GPU-staged) path,
+  because that path requires zero started exchanges in flight and the pair
+  loop keeps one or two boundary exchanges outstanding at all times.
+- Enabling prerequisite, if this is ever revisited: move the pair loop's
+  part-boundary exchanges onto the queued GPU-staged path (or add a second
+  staging channel for small mid-part frames). That is a transport redesign,
+  not an executor change.
+
+Measurement trap recorded for every future gated route: the probe's
+`CollectiveTrace` decorator must delegate newly added transport methods —
+the first four "A/B" pairs of this experiment were accidental A/A (the
+split silently never ran) until a profile showed zero assembly-kernel
+launches.
 
 ## Candidate 2 — N-split the HC up / anything after the low-rank bottleneck
 
@@ -66,11 +80,14 @@ one profile pass with launcher instrumentation) before deciding.
 
 ## Bottom line
 
-One implementable candidate with a positive modeled net (mixer-down
-N-split, ~+1.8 % ceiling, bit-exact, +4.4 % wire). Everything else in the
-replicated family is either bandwidth-dead or needs the shape-capture pass
-first. Combined with the routed family's demonstrated scheduling
-sensitivity (R1a: a 6–9 % per-call regression from a loop-bound change),
-the honest post-G1 map is: GDN done, routed experts need a
-weight-streaming mechanism (not tiling), and the mixer-down split is the
-next structural win.
+The one implementable candidate was implemented and rejected on transport
+architecture, not bandwidth: mid-part exchanges serialize behind the
+part-boundary stagings in the single worker thread, and the host-side
+finish starves the stream (−35 % e2e against a +1.8 % ceiling). Everything
+else in the replicated family is bandwidth-dead or needs the shape-capture
+pass first, and the shape capture is now moot for splitting purposes —
+**exchange-based sharding of the replicated family is closed on this
+transport** until small mid-part frames can be GPU-staged (queued path for
+the pair loop's boundary exchanges, or a second staging channel). The
+remaining honest levers for prefill are single-host kernel-level speedups
+(which help both configurations) and the transport-level staging redesign.
