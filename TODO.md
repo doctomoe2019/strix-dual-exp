@@ -144,6 +144,34 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~15:50 W1 ROUTED PACKED-LAYOUT CAMPAIGN CLOSED (mechanism
+  validated, integration PARKED; gufo 13d7d1c docs-only, code REVERTED
+  clean; evidence/prefill-triage/routed-w1/ incl. the 280-line
+  re-appliable prototype patch + bench logs). Built sibling kernel
+  instantiations behind opt-in packed_q5/packed_k flags + a 512-expert
+  bench with rotating padded routing maps and an allocation-placement
+  (aa) control. Results (byte-identical outputs everywhere, aa within
+  ±0.4%): Q5_1 down stage-major meta/code planes (codes uint4)
+  -4.1/-5.2/-7.5% @1024/2048/4096 tokens k=320 (-4.4..-5.5% k=640);
+  Q4_K paired gate/up chunk-planar 1KiB planes -4.5/-3.5/-2.1%.
+  Alternatives beaten: down 48B-record-contiguous -4.4%, gate/up
+  superblock-grouped records -2.4%. MEASUREMENT TRAP: a "−25%" gate/up
+  datapoint was an addressing bug whose loads aliased into one ~320B
+  window (dense overlapping reads = fast garbage); caught by the output
+  hash. WHY PARKED: modeled full rollout = down 1731ms×5.4% + gate/up
+  2097ms×3.4% ≈ 164ms/rank ≈ +1.1% e2e @32k (HCS1's +0.86% didn't
+  separate); single-copy production (USER REQUIREMENT) requires
+  converting ALL consumers (RoutedF16 all widths, non-paired gate/up,
+  fallbacks, MMQ decode vector kernels — persistent-SSM decode
+  regression precedent); paired gate/up ~half activation-reread-bound
+  (838MB logical vs 441MB weights/call) so weight layout caps it ~4%.
+  Revisit triggers: decode-side packed MMQ reader lands anyway; gate/up
+  activation rereads addressed; single-host headline work (down gain
+  doubles). GPU load-time repack cost ~35GB/rank once, tensor-wise temp
+  ≤~460MiB — cheap when triggered. routed_wmma_ops_test exit 0 on both
+  the prototype and reverted builds; dense_gemm_bench canonical hashes
+  reproduced post-revert.
+
 - 2026-10-06 ~14:40 V2 HC STAGE-DEPTH SCREEN CLOSED (rejected; gufo 6b06771
   test/bench+guard commit; evidence/prefill-triage/hc-v2/). Mechanism:
   deepen the LDS K-stage of the HC up (DenseF16GEMM<256,128,BK,4,2,8,true>)

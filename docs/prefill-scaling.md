@@ -281,6 +281,25 @@ triage: ≈ +5.5% over the Stage-1b build.
      up/down epilogue-efficiency family is exhausted at the kernel level; no
      paired A/B spent. Evidence: `evidence/prefill-triage/hc-v2/`.
 
+14. **[Routed packed weight layouts (W1), CLOSED 2026-10-06: mechanism
+     validated, integration parked.]** Byte-permuting weight layouts for
+     the routed family, read by sibling kernel instantiations (opt-in
+     flags): Q5_1 down from stage-major metadata/code planes (codes
+     16-byte aligned, one `uint4`), paired Q4_K gate/up from chunk-major
+     1 KiB planes within 64-row block groups. Standalone bench (512
+     experts, rotating padded routing, raw-copy placement control):
+     **down −4.1…−7.5%, gate/up −2.1…−4.5%**, byte-identical outputs at
+     every point. Parked: modeled full-rollout ≈ +1.1% e2e/rank @32k —
+     below the paired separation bar — while single-copy production
+     requires converting every consumer including the MMQ decode vector
+     kernels (persistent-packed-SSM decode regression is the precedent),
+     and the paired gate/up kernel is ~half activation-reread-bound
+     (838 MB logical slot reads vs 441 MB weights per call), capping
+     weight-layout gains. Prototype preserved as a re-appliable patch;
+     revisit when a decode-side packed reader exists or the gate/up
+     activation rereads are addressed. No paired A/B spent.
+     Evidence: `evidence/prefill-triage/routed-w1/`.
+
 Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),
 instruction-level combine tuning (H1 rejected), routed epilogue/tiling
