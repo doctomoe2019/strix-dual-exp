@@ -6,15 +6,18 @@ gufo / kernel trees.
 
 ## Ownership and visibility
 
-All of this work is **private**. It lives in doctomoe's own repositories
-only. The gufo upstream (github.com/neuhaus/gufo) and the Linux kernel
-sources are **read-only upstreams** we build on; we never publish to them.
+The **GitHub repository is public** (`doctomoe2019/strix-dual-exp`);
+everything else about this work stays private: the private-server origin
+(recorded in each host's local git config), the machines, the evidence
+trees and the operational handover. The gufo upstream
+(github.com/neuhaus/gufo) and the Linux kernel sources are **read-only
+upstreams** we build on; we never publish to them.
 
 ## Repositories and remotes
 
 | Tree | Remote(s) | Role |
 | --- | --- | --- |
-| `/root/strix-dual-exp` (this repo) | `origin` fetch: `git@github.com:doctomoe2019/strix-dual-exp.git` (upstream, private server); `origin` push URLs: the private server **and** `git@github.com:doctomoe2019/strix-dual-exp.git` (GitHub mirror) | Experiment repo: docs, evidence index, kernel patches, gufo WIP patch. A single `git push` updates both destinations; the private server is the upstream of record, GitHub is the mirror. |
+| `/root/strix-dual-exp` (this repo) | `origin`: the private git server (upstream of record, endpoint in local git config only — never write it into tracked files) **and** the public GitHub mirror `git@github.com:doctomoe2019/strix-dual-exp.git` | Experiment repo: docs, kernel patches, gufo WIP patch. A single `git push` updates both destinations. |
 | `/root/gufo` (branch `feat/tp2-tbstream`) | `origin` = `https://github.com/neuhaus/gufo` — **NEVER PUSH. No credentials exist by design.** | Gufo work stays on the local branch. It is shared only as the sanitized patch `gufo/0001-feat-tp2-tbstream-wip.patch` in this repo (diff vs the `feat/tp2-rdma` base `2833856`), regenerated after every gufo commit. |
 | Kernel trees (`kernel/build-tree`, `/root/kernel-src-7.3rc3`) | none | Local build trees only; their divergence is expressed as patches under `kernel/patches/`. Never push to any Linux upstream. |
 
@@ -28,10 +31,14 @@ sources are **read-only upstreams** we build on; we never publish to them.
    GitHub mirror. If one side rejects, fix or report it — never leave the
    two destinations diverging silently.
 3. **Secret scan before every push:** tracked content must contain no
-   hostnames, LAN/VPN/tbnet IPs (`192.168.`, `10.8.0.`, `10.55.`),
-   link-local IPv6, UUIDs or MAC addresses. `evidence/` and
-   `scripts/env.sh` are gitignored precisely to keep raw logs local; scan
-   the gufo WIP patch after regenerating it (generic doc placeholders like
+   hostnames, private-infrastructure addresses (VPN/LAN/tbnet IPs of OUR
+   deployment — RFC1918 example values in documentation are fine), real
+   machine identifiers (UUIDs/MACs), credentials or private keys. Real
+   per-site values (hostnames, tbnet subnet) live in `scripts/env.sh`
+   (gitignored; tracked scripts read them with neutral defaults — see
+   `scripts/env.sh.example`). `evidence/` and `scripts/env.sh` are
+   gitignored precisely to keep raw logs and site config local; scan the
+   gufo WIP patch after regenerating it (generic doc placeholders like
    `boltctl authorize <uuid>` are fine).
 
 ## Commit policy
@@ -48,4 +55,4 @@ sources are **read-only upstreams** we build on; we never publish to them.
   secret-scan it, commit the regenerated patch here, then push.
 - The deployed serve binaries (`/root/newbin/gufo`) and the frozen kernel
   are operational state, not git content; their hashes are recorded in
-  `/root/HANDOVER-TBSTREAM.md`.
+  `/root/HANDOVER-TBSTREAM.md` (a local file — never publish it).

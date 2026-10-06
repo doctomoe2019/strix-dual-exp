@@ -1,11 +1,17 @@
 #!/bin/bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # Disciplined tbstream bring-up after reboot (per host).
 # Usage: bringup.sh [rank]  (0 = hostA local, 1 = hostB local)
 set -e
 RANK=${1:-0}
 PEER=$((1-RANK))
-MYIP="10.55.0.$((RANK+1))"
-PEERIP="10.55.0.$((PEER+1))"
+MYIP="$TBNET_BASE.$((RANK+1))"
+PEERIP="$TBNET_BASE.$((PEER+1))"
 
 # 1. tbnet IP + MTU
 ip addr add $MYIP/24 dev thunderbolt0 2>/dev/null || true

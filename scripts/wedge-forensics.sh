@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # Phase-0 forensic capture — run ON A WEDGED HOST BEFORE REBOOTING.
 # Captures the hardware-vs-driver discriminator (NHI PCI config space
 # responsiveness) plus full driver/device state into a tarball.

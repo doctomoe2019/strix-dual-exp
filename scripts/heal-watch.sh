@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # heal-watch.sh — last-mile healer for the TBSTREAM self-heal chain.
 # The kernel (v6 module) detects a wedged peer, forces a link
 # disconnect/retrain and re-enumerates the XDomain. The recreated
@@ -6,7 +12,7 @@
 # entries are gone; this daemon re-applies the network + stream setup
 # whenever the peer becomes unreachable but the XDomain is back.
 RANK=${1:-0}
-PEER=10.55.0.$(( 1 - RANK + 1 ))
+PEER=$TBNET_BASE.$(( 1 - RANK + 1 ))
 LOG=$(dirname "$0")/../evidence/heal-watch.log
 echo "[$(date +%F\ %T)] heal-watch start rank=$RANK peer=$PEER" >> $LOG
 

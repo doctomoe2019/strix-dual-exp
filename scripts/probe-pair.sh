@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # Pair-runner for the batched probe in-vivo bisection. Honors RUN_DIR
 # (unique per-block evidence dir; rank-1 log fetched back from the peer).
 . "$(dirname "$0")/env.sh"
@@ -23,7 +29,7 @@ nohup env ${GUFO_ENV:-} ./qwen38_flash_next_tp_batched_probe \
 R0_PID=$!
 sleep 2
 ssh $HOST_B "cd $BIN_DIR && ${R1_ENV_PREFIX}timeout 240 stdbuf -oL -eL ./qwen38_flash_next_tp_batched_probe \
-  --tp-rank 1 --tp-bootstrap-host 10.55.0.1 --tp-transport tbstream \
+  --tp-rank 1 --tp-bootstrap-host $TBNET_A_IP --tp-transport tbstream \
   --tp-tbstream-dev /dev/tbstream0 $* > $R1_REMOTE 2>&1; echo R1-RC=\$?"
 timeout 15 scp -q $HOST_B:"$R1_REMOTE" "$R1_LOG" 2>/dev/null || echo "(r1 log fetch failed)"
 wait $R0_PID; echo "R0-RC=$?"

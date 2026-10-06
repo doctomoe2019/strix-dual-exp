@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # Storm test v2: cycle probes until wedge; then poll self-heal markers.
 . "$(dirname "$0")/env.sh"
 LOG=$(dirname "$0")/../evidence/storm-log.txt
@@ -25,13 +31,13 @@ if [ "${E1:-0}" = "0" ] && [ "${E2:-0}" = "0" ]; then mark "no wedge in 25 cycle
 T0=$(date +%s)
 while [ $(( $(date +%s) - T0 )) -lt 300 ]; do
   sleep 5
-  P=$(ping -c1 -W1 10.55.0.2 >/dev/null 2>&1 && echo ok || echo dead)
+  P=$(ping -c1 -W1 $TBNET_B_IP >/dev/null 2>&1 && echo ok || echo dead)
   RT=$(dmesg | grep -c "forcing link retrain")
   EL=$(( $(date +%s) - T0 ))
   echo "[$(date +%H:%M:%S)] t+${EL}s ping=$P local-retrains=$RT" >> $LOG
   if [ "$P" = "ok" ]; then
     sleep 5
-    P2=$(ping -c1 -W1 10.55.0.2 >/dev/null 2>&1 && echo ok || echo dead)
+    P2=$(ping -c1 -W1 $TBNET_B_IP >/dev/null 2>&1 && echo ok || echo dead)
     if [ "$P2" = "ok" ]; then
       mark "RECOVERED after ${EL}s without reboot"
       OUT=$(bash $(dirname "$0")/probe-pair.sh POST-HEAL --model /models/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 4096 --max-tokens 16 2>&1 | grep -E "R1-RC=|errs|ping=")

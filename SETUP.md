@@ -3,12 +3,13 @@
 Everything needed to reproduce the setup end to end: two stock Strix
 Halo-class hosts, one USB4v2 cable, this repository, and the gufo fork.
 End state: a self-healing two-rank tensor-parallel LLM serving pair with
-prefill ~2100–2200 tok/s and MTP decode ~65–73 tok/s at full depth.
+prefill ~2.1–2.3k tok/s and MTP decode ~65–73 tok/s at full depth.
 
 Everything below was verified on the pair on 2026-10-05. Placeholders:
-`hostA` (rank 0, listener), `hostB` (rank 1, connector). In our repo
-scripts `hostB` defaults to the ssh alias `hostB` (see
-`scripts/env.sh`).
+`hostA` (rank 0, listener), `hostB` (rank 1, connector). The tracked
+scripts default to those ssh aliases and the `10.55.0.0/24` tbnet
+addresses below; copy `scripts/env.sh.example` to `scripts/env.sh`
+(gitignored) to point them at your own hostnames and subnet.
 
 ## 0. Prerequisites
 

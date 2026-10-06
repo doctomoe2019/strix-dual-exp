@@ -255,3 +255,12 @@ This project stands on a great deal of upstream work:
   expresses our entire divergence from it.
 
 See `docs/wedge-investigation.md` for the detailed experiment record.
+
+## License
+
+[MIT](LICENSE) for this repository's own content — documentation, scripts,
+and the gufo WIP patch (itself a derivative of the MIT-licensed
+[gufo](https://github.com/neuhaus/gufo), with attribution in the credits
+above). The `kernel/` tree is a derivative work of the Linux kernel
+(thunderbolt driver) and is GPL-2.0-only, as its upstream headers state;
+our kernel changes are published under GPL-2.0 with them.

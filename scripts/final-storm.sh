@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # Final validation: continuous probe cycling THROUGH wedges.
 . "$(dirname "$0")/env.sh"
 # A cycle that wedges waits for autonomous recovery (kernel heal +
@@ -22,9 +28,9 @@ for TAG in V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12; do
     T0=$(date +%s); OK=0
     while [ $(( $(date +%s) - T0 )) -lt 120 ]; do
       sleep 5
-      if ping -c1 -W1 10.55.0.2 >/dev/null 2>&1; then
+      if ping -c1 -W1 $TBNET_B_IP >/dev/null 2>&1; then
         sleep 3
-        if ping -c1 -W1 10.55.0.2 >/dev/null 2>&1; then OK=1; break; fi
+        if ping -c1 -W1 $TBNET_B_IP >/dev/null 2>&1; then OK=1; break; fi
       fi
     done
     if [ "$OK" = "1" ]; then

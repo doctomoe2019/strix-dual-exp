@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Per-site values: scripts/env.sh (gitignored) overrides these defaults.
+_dir=$(dirname "$(readlink -f "$0")")
+[ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
+: "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.55.0}"
+TBNET_A_IP="${TBNET_A_IP:-$TBNET_BASE.1}"
+TBNET_B_IP="${TBNET_B_IP:-$TBNET_BASE.2}"
 # One straced gufo cycle (rank 0 local under strace, rank 1 remote).
 . "$(dirname "$0")/env.sh"
 BIN_DIR=/root/gufo/build/gpu-tp2-tbstream/tests/models/qwen38_flash_next
@@ -13,7 +19,7 @@ GUFO_TBSTREAM_COALESCE=1 setsid nohup strace -f -tt -yy -e trace=write,read,clos
 sleep 2
 timeout 8 ssh $HOST_B "cd $BIN_DIR && GUFO_TBSTREAM_COALESCE=1 setsid nohup \
   ./qwen38_flash_next_tp_batched_probe \
-  --tp-rank 1 --tp-bootstrap-host 10.55.0.1 --tp-transport tbstream \
+  --tp-rank 1 --tp-bootstrap-host $TBNET_A_IP --tp-transport tbstream \
   --tp-tbstream-dev /dev/tbstream0 --model $MODEL \
   --context 4096 --max-tokens 16 \
   > /root/strix-dual-exp/evidence/strace-b3-r1.log 2>&1 < /dev/null &" 2>/dev/null
