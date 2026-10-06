@@ -160,10 +160,23 @@ where stream teardown desyncs one host's NHI control plane until reboot
   the dual-host ceiling moved from 2.0–2.2 k to **~2.33 k tok/s** with the
   HC inject-into-combine fusion (HCF1, 2026-10-06, +2.65 % paired @32k);
   the remaining gap to ideal scaling is triaged — GPU compute that TP2
-  does not halve (lost MoE-epilogue fusion, exchange-boundary overhead
-  kernels, replicated hyperconnection/indexer projections), not the USB4
-  link, which sits 97 %+ hidden behind compute. Ranked fixes and their
-  estimated ceilings are in the doc.
+  does not halve, not the USB4 link, which sits 97 %+ hidden behind
+  compute. **Next ranked candidate:** the short-K HC up/down epilogue
+  screen — the fused HC up projection (~835 ms/rank @32k) plus the
+  mixer-down W8A8 (~662 ms/rank) close out a ~4.4 s/rank hyperconnection
+  chain. **Closed routes** (do not re-propose without new mechanism):
+  exchange-based sharding of the replicated family (S1: mid-part
+  exchanges serialize in the transport's single staging worker, −35 %),
+  KV-cache 1-byte quantization (KV1: numerics 5–10× accepted TP2 noise,
+  packed-reader speed ceiling ~+1–2 % prefill, decode ≤0.75 %), and the
+  MoE-combine inject-emission variant (its norm compiles to
+  mixed-precision `v_fma_mix*_f16`; no source-level replay is
+  bit-exactible). Ranked fixes and their estimated ceilings are in the
+  doc.
+- **Deploy HCF1 to serving**: the retained fusion lives in gufo's
+  committed branch (`4c68409`) but the deployed serve binary predates it —
+  rebuild `.#tp2-tbstream`, redeploy both hosts, smoke, then refresh the
+  serve-side numbers when `gufo-prod` returns.
 - **Wedge residuals**: the primary trigger (teardown while the peer is
   mid-stream) is fixed by baseline-B; what remains is to quantify any
   cable-end-correlated residue with controlled cable-identification
