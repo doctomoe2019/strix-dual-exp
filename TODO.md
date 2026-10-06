@@ -144,6 +144,31 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~13:30 HCS1 RETAINED: F32 mixed-store skip on the wide FFN
+  mixer route (gufo 3174c40; serve binary still pre-HCF1, deploy pending).
+  MoePart's fused HC projection skips the F32 mixed store — all its
+  consumers read the F16/Q8 cached copies (F16 router, Q8 shexp, F16 routed
+  rows); attention mixers keep the store (BF16 indexer re-narrow + F32
+  alpha_beta re-read F32 directly; alpha_beta IS F32 in this GGUF, router
+  F16). kSkipF32 template sibling -> storing variant's codegen untouched;
+  HcMix mixed_reread flag + cached router-type scan + MoE-observer check.
+  Kernel isolated 580->471us (-18.8%) @2048; route verified via profiled
+  instantiation names (48 skip + 48 keep per chunk). Gates: operator
+  sentinel check exact (96/2049); gpu_probe dump == canonical 8ddefb67;
+  canonical member checksums both ranks every clean session; decode flat.
+  INCIDENT (protocol): the FIRST paired matrix was accidental A/A — the
+  scan initially included alpha_beta (F32 but only consumes the ATTN
+  mixer's row), suppressing the skip (0 skip-kernels in profile; +0.1%
+  "median" = noise). Route-fires profile caught it; everything re-run
+  (aa-control/ holds the A/A logs). Corrected paired TP2 @32k 4v4
+  canary-clean: 2288.6-2332.5 (A median 2310.2) vs 2303.4-2334.8 (B median
+  2330.1) = +0.86%, 7/8 B>=A-median, not fully separated; 8k even.
+  Retained on kernel evidence (pure store removal, zero arithmetic change)
+  despite <1% timing. NEXT by ledger: HC up/down epilogue screen continues
+  (V2 barrier-merge candidate; then the down kernel), or the routed-expert
+  weight-layout prototype; slow-session diagnostic as filler. rocprofv3 -i
+  counter collection is BROKEN in this nix wrapper (silent no-op, even
+  -- echo) — do not burn time on PM counters; kernel-trace mode works.
 - 2026-10-06 ~10:15 HCF1 RETAINED: HC inject partials fused into the F16
   combine (gufo worktree uncommitted on 7d6379f; serve binary 31127d4c does
   NOT contain it — deploy decision pending; prod still down). The plain and

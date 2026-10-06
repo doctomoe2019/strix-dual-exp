@@ -247,6 +247,24 @@ the historical reference ≈ 2 285 — absolute levels drift by session, the
 paired deltas are the decision basis). Cumulative retained since the
 triage: ≈ +5.5% over the Stage-1b build.
 
+12. **[F32 mixed-store skip (HCS1), DONE 2026-10-06: retained, +0.86%
+    median @32k.]** The FFN mixer's wide fused projection no longer writes
+    the F32 mixed row: every consumer reads the F16/Q8 side outputs through
+    the executor's activation caches (F16 router, Q8 shared expert, F16
+    routed rows). A `kSkipF32` template sibling keeps the storing variant's
+    codegen untouched; the attention mixer still stores (its row feeds the
+    BF16 indexer re-narrow and the F32 SSM alpha/beta projection), and a
+    cached router-type scan plus the MoE-observer check re-enable the store
+    when needed. Isolated kernel −18.8% (580→471 µs @2 048 tokens); the
+    first paired A/B was an accidental A/A — the scan initially included
+    `alpha_beta` (F32 in this model, but it consumes only the attention
+    mixer's row) and suppressed the skip; the corrected build's profile
+    shows 48 skip + 48 keep instantiations per chunk. Paired TP2 4v4
+    canary-clean @32k: 2 310→2 330 median (+0.86%, not fully separated),
+    8k even, decode flat, checksums canonical. Retained on kernel evidence
+    (pure store removal, zero arithmetic change). Evidence:
+    `evidence/prefill-triage/hcs1/`.
+
 Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),
 instruction-level combine tuning (H1 rejected), routed epilogue/tiling
