@@ -144,6 +144,24 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~20:40 SLOW-SESSION PHASE A CLOSED — the guardian's rejections
+  were cold-first artifacts, the canary/guardian are reclocked, and a pair
+  was accepted and torn down cleanly. Facts
+  (evidence/prefill-triage/slow-session/PHASEA.md): cold first requests
+  measure 1303–1850 tok/s vs the warmed pair band ~1990–2000; every pair
+  tracked past two warmed requests reached ≥1927 (one accepted run
+  converged 1385→1810→1927→2000→1997); single-host probe 8/8 in the fast
+  band (1671 median) today. Fixes: canary nonce + uncached-full-prefill
+  validation (ERROR ≠ SLOW), WARMUP mode; guardian warmup→measure→confirm
+  flow, /ready readiness, PORT env forwarded, per-run persistent rank
+  logs, remote-kill and process-detection fixes, retry budget reset, no
+  default drop_caches/compaction. Withdrawn: "ten genuinely slow draws"
+  (cold artifact) and the TTM-pool-recycling rationale (drop_caches=3
+  reaches the pool shrinker; ordinary weight backing is not pooled; idle
+  pools empty). Open: one draw plateaued at ~1780–1798 through two warmed
+  requests (n=1) — ramp-vs-plateau unresolved; a future slow-plateau pair
+  must be PRESERVED for Phase B attribution (placement/queue/host-phase
+  hypotheses ranked in the investigation write-up), not re-drawn.
 - 2026-10-06 ~18:25 REBOOT-READINESS GAP CLOSED in the heal chain (both
   hosts; commit pending). Post-reboot check showed hostA's stream at
   busy_poll=0: the boot healer's bringup.sh aborted at the in_hopid

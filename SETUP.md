@@ -228,6 +228,30 @@ p50 27.1 µs @10 KiB. Full table with provenance: `README.md` and
 
 ## 7. Operations runbook
 
+### Serve start-up guardian (warm-pair guarantee)
+
+`scripts/serve-guardian.sh` owns the serve lifecycle: it refuses to double
+up, preflights the stream, launches rank1-first with a fresh control token
+per cycle, waits for `GET /ready`, sends one **unclassified warmup**
+request, then judges warmed performance with the canary
+(`scripts/serve-canary.sh`), re-drawing the pair (capped, default 3) when a
+warmed process measures below `SERVE_CANARY_TPS` (default 1900, calibrated
+on warmed 8k MTP measurements; a low measured canary gets one
+confirmation request before rejection). Accepted pairs are supervised;
+exits restart with a fresh budget; TERM the guardian PID for a clean
+two-rank teardown. Per-cycle rank logs land in
+`evidence/serve-guardian/<runid>/`.
+
+Measurement rules encoded there (see
+`evidence/prefill-triage/slow-session/PHASEA.md`): a fresh process's FIRST
+request carries lazy first-use costs and must never classify it; canaries
+use unique prompts (the prompt cache would measure zero prefill) and are
+only valid when `cached_tokens == 0` and
+`prefill_tokens == prompt_tokens`; request/transport failures are ERROR,
+never SLOW. The single-host fast band today is ~1670 tok/s (probe, 8k
+non-MTP) and the warmed pair canary band ~1990–2000; slow draws, if one
+appears, should be preserved for attribution, not just re-drawn.
+
 - **Never** `rmmod` this stack or PCI-unbind the NHI on a live pair;
   module changes go through reboot, hostB first.
 - A failed run is data: the harness yields to the healer; resume only
