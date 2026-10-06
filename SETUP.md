@@ -80,13 +80,26 @@ ssh hostB 'bash <repo>/scripts/bringup.sh 1'
 ```
 
 `bringup.sh` discovers the kstreamp service directory, creates the
-configfs stream and pins **in/out HopID 16/16** and `busy_poll=1`.
+configfs stream and pins **in/out HopID 16/16** and `busy_poll=1`
+(interrupt-free ring polling — the decode exchanges need it; without it
+the RX path is paced by per-frame interrupt→wake→repost). Attribute
+writes to an already-attached stream can fail with `EBUSY`; the script
+tolerates that whenever the attribute already holds the target value.
 The explicit HopIDs matter: auto-negotiation (`echo -1`) takes HopID 8,
 which `thunderbolt-net` requires — if bring-up wins that race at boot,
 tbnet fails with "failed to allocate Rx HopID" (we hit exactly this).
 Recovery if it happens anyway: rmdir the configfs stream dirs, unbind/
 rebind the `thunderbolt-net` *service* driver (safe — not the NHI),
 re-run bringup.
+
+The enabled `tbstream-heal@<rank>.service` (one per host) runs
+`heal-watch.sh`, which enforces the serving prerequisites **every
+pass**: it repairs `busy_poll` drift on any live stream, re-applies a
+full bring-up when the stream is missing while the XDomain is up (e.g.
+one host rebooted while the other stayed up), and keeps the original
+peer-dead → kernel-self-heal → re-bringup chain. A reboot therefore
+converges to a serving-ready link on its own; `gufo-prod.service`
+additionally drops caches before start but is currently disabled.
 
 Health check after bring-up:
 

@@ -144,6 +144,26 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~18:25 REBOOT-READINESS GAP CLOSED in the heal chain (both
+  hosts; commit pending). Post-reboot check showed hostA's stream at
+  busy_poll=0: the boot healer's bringup.sh aborted at the in_hopid
+  write ("Device or resource busy" on the already-attached stream) under
+  set -e, never reaching busy_poll=1 — and the watcher only re-applied
+  config on peer death, so the drift persisted while the peer stayed up.
+  busy_poll is the interrupt-free ring-poll mode (stream.c:133) the
+  decode exchanges require; without it RX is paced per-frame by
+  interrupt->wake->repost. FIXES: (1) bringup.sh attribute writes are now
+  EBUSY-tolerant when the value already matches (verified idempotent on
+  the live attached stream: both HopID writes tolerated, ATTACHED-OK);
+  (2) heal-watch.sh enforces busy_poll=1 on every 2s pass and re-applies
+  a full bring-up when the stream is missing with the XDomain up
+  (verified: manual drift to 0 repaired within one pass, logged).
+  Scripts synced to hostB, tbstream-heal@1 restarted clean, busy_poll=1
+  on both hosts. SETUP.md documents the self-healing behavior. Also
+  noted: gufo-prod.service + postboot-validate.service are disabled;
+  tbstream-heal@<rank> is the only enabled boot automation and now owns
+  the serving prerequisites.
+
 - 2026-10-06 ~15:50 W1 ROUTED PACKED-LAYOUT CAMPAIGN CLOSED (mechanism
   validated, integration PARKED; gufo 13d7d1c docs-only, code REVERTED
   clean; evidence/prefill-triage/routed-w1/ incl. the 280-line

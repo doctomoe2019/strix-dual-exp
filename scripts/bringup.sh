@@ -36,9 +36,27 @@ echo "service dir: $SVC"
 BASE=/sys/kernel/config/thunderbolt/stream
 mkdir -p $BASE/$SVC 2>/dev/null || true
 mkdir $BASE/$SVC/gufo 2>/dev/null || true
-echo 16 > $BASE/$SVC/gufo/in_hopid
-echo 16 > $BASE/$SVC/gufo/out_hopid
-echo 1 > $BASE/$SVC/gufo/busy_poll
+# Writes to an already-attached stream can fail with EBUSY (observed
+# 2026-10-06: the post-reboot heal aborted at the HopID line under set -e
+# and busy_poll was never applied). A failed write is fine when the
+# attribute already holds the target value.
+set_attr() {  # path value
+  if ! echo "$2" > "$1" 2>/dev/null; then
+    local holds
+    holds=$(cat "$1" 2>/dev/null)
+    if [ "$holds" = "$2" ]; then
+      echo "note: $1 already $2 (EBUSY write tolerated)"
+      return 0
+    fi
+    echo "ERROR: cannot set $1=$2 (holds $holds)"
+    return 1
+  fi
+}
+set_attr $BASE/$SVC/gufo/in_hopid 16
+set_attr $BASE/$SVC/gufo/out_hopid 16
+# busy_poll=1: interrupt-free ring polling; the decode-shape exchanges
+# need it (stream.c: "Instead of interrupts, busy poll the rings").
+set_attr $BASE/$SVC/gufo/busy_poll 1
 
 # 4. Wait for genuine attach (character device + O_NONBLOCK open succeeds)
 for t in $(seq 1 12); do
