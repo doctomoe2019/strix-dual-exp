@@ -248,22 +248,38 @@ paired deltas are the decision basis). Cumulative retained since the
 triage: ≈ +5.5% over the Stage-1b build.
 
 12. **[F32 mixed-store skip (HCS1), DONE 2026-10-06: retained, +0.86%
-    median @32k.]** The FFN mixer's wide fused projection no longer writes
-    the F32 mixed row: every consumer reads the F16/Q8 side outputs through
-    the executor's activation caches (F16 router, Q8 shared expert, F16
-    routed rows). A `kSkipF32` template sibling keeps the storing variant's
-    codegen untouched; the attention mixer still stores (its row feeds the
-    BF16 indexer re-narrow and the F32 SSM alpha/beta projection), and a
-    cached router-type scan plus the MoE-observer check re-enable the store
-    when needed. Isolated kernel −18.8% (580→471 µs @2 048 tokens); the
-    first paired A/B was an accidental A/A — the scan initially included
-    `alpha_beta` (F32 in this model, but it consumes only the attention
-    mixer's row) and suppressed the skip; the corrected build's profile
-    shows 48 skip + 48 keep instantiations per chunk. Paired TP2 4v4
-    canary-clean @32k: 2 310→2 330 median (+0.86%, not fully separated),
-    8k even, decode flat, checksums canonical. Retained on kernel evidence
-    (pure store removal, zero arithmetic change). Evidence:
-    `evidence/prefill-triage/hcs1/`.
+     median @32k.]** The FFN mixer's wide fused projection no longer writes
+     the F32 mixed row: every consumer reads the F16/Q8 side outputs through
+     the executor's activation caches (F16 router, Q8 shared expert, F16
+     routed rows). A `kSkipF32` template sibling keeps the storing variant's
+     codegen untouched; the attention mixer still stores (its row feeds the
+     BF16 indexer re-narrow and the F32 SSM alpha/beta projection), and a
+     cached router-type scan plus the MoE-observer check re-enable the store
+     when needed. Isolated kernel −18.8% (580→471 µs @2 048 tokens); the
+     first paired A/B was an accidental A/A — the scan initially included
+     `alpha_beta` (F32 in this model, but it consumes only the attention
+     mixer's row) and suppressed the skip; the corrected build's profile
+     shows 48 skip + 48 keep instantiations per chunk. Paired TP2 4v4
+     canary-clean @32k: 2 310→2 330 median (+0.86%, not fully separated),
+     8k even, decode flat, checksums canonical. Retained on kernel evidence
+     (pure store removal, zero arithmetic change). Evidence:
+     `evidence/prefill-triage/hcs1/`.
+
+13. **[HC up/down stage-depth screen (V2 barrier-merge), CLOSED 2026-10-06:
+     rejected on measurement.]** Deepening the LDS K-stage to cut the
+     per-stage barrier count: up kernel BK=2 (24→48 KB stage) −9.3%
+     (471→522 µs @2 048, skip-F32 route); HC down BK=8 (80→40 stages,
+     27.6→55.3 KB, bit-exact hash) −19.2% (401→478 µs). Occupancy loss
+     dominates the barrier saving; both kernels sit at their practical WMMA
+     ceilings for these shapes (28.5/33.5 TFLOPS-equivalent), and the up
+     epilogue's two barriers per 16-token group are the data-flow minimum at
+     the 24 KB stage (double-buffered `gates` needs 33.3 KB). Screen byproduct:
+     `W8A8BlockedWmmaGEMMKernel`'s floor `(BM·BK)/256` fetch count silently
+     dropped weight rows for non-multiple instantiations (BK=5/6 computed
+     wrong hashes) — now a compile-time guard; `dense_gemm_bench` gained the
+     missing HC-down case (401 µs @2 048 / 529 µs @2 049 baseline). The HC
+     up/down epilogue-efficiency family is exhausted at the kernel level; no
+     paired A/B spent. Evidence: `evidence/prefill-triage/hc-v2/`.
 
 Not worth pursuing for prefill: wire quantization (+2–4 % ceiling, already
 measured), link latency (fully hidden), chunk-size tuning (C1 closed),

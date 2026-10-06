@@ -144,6 +144,29 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~14:40 V2 HC STAGE-DEPTH SCREEN CLOSED (rejected; gufo 6b06771
+  test/bench+guard commit; evidence/prefill-triage/hc-v2/). Mechanism:
+  deepen the LDS K-stage of the HC up (DenseF16GEMM<256,128,BK,4,2,8,true>)
+  and down (W8A8BlockedWmma<64,128,BK,2,4,true>) kernels to cut the
+  2-barriers-per-stage count. Results @2048 isolated (dense_gemm_bench,
+  n=15): up BK=2 471->522us (-9.3%, hcs route); down BK=8 401->478us
+  (-19.2%, BIT-EXACT hash) — occupancy loss from the fatter LDS stage
+  dominates; both kernels at practical WMMA ceilings (28.5/33.5
+  TFLOPS-equiv). Up epilogue barrier count is LDS-capacity-locked
+  (double-buffered gates needs 33.3KB > 24KB stage). HAZARD found+guarded:
+  W8A8 kPrefetch=(BM*BK)/256 floors with no bounds check — BK=5/6
+  instantiations silently computed on unstaged weight rows (wrong hashes);
+  static_assert((BM*BK)%256==0) added (all in-tree instantiations pass;
+  DenseF16 template legitimately supports partial stages via ceil+a_live —
+  assert is W8A8-only). Bench gained the hcd case (down baseline 401us
+  @2048 / 529us @2049, hashes recorded). Screen done in-tree with env-var
+  dispatch scaffolding, REVERTED before commit; final build re-verified
+  baseline hashes+operator tests (7 exact). No paired A/B spent (isolated
+  regressions can't recover e2e). HC up/down epilogue-efficiency family
+  EXHAUSTED at kernel level. NEXT by ledger: routed-expert weight
+  layout/streaming prototype (the ~6.9s routed family), or slow-session
+  diagnostic; serve binary daff7d61 unaffected (no production path change).
+
 - 2026-10-06 ~13:30 HCS1 RETAINED: F32 mixed-store skip on the wide FFN
   mixer route (gufo 3174c40; serve binary still pre-HCF1, deploy pending).
   MoePart's fused HC projection skips the F32 mixed store — all its

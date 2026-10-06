@@ -138,7 +138,7 @@ index e817093..e34d1db 100644
  | `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
  | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..e61bcd4 100644
+index 0b6a02b..52b932b 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 @@ -46,6 +46,9 @@
@@ -151,16 +151,18 @@ index 0b6a02b..e61bcd4 100644
  | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
  | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
  | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
-@@ -65,6 +68,8 @@
+@@ -65,6 +68,10 @@
  | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
  | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
  | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
 +| KV cache 1-byte quantization pilot | Rejected as a default path and closed as performance-inconclusive. An env-gated measurement pilot quantized newly written trunk KV rows (int8 + FP16 scale per 32/16/8-element block, per-element E4M3, V-only and K+V; FP16 storage unchanged, draft cache untouched) and compared full-vocab logits over 428-row teacher-forced continuations: every format drifts to 78–92% top-1 agreement with mean KL 4e-3–5e-2 across synthetic and real 16k–38k histories, 5–10× the accepted TP2 reduction noise (98.4%, 0.0055). Speed: writer overhead ~0 (32k single-host prefill medians 1557/1550/1558 tok/s for FP16/v8/E4M3); the sparse attention family is largely DRAM-bound so packed halved-bytes caps at ~+3–4% prefill best case, ~+1–2% realistic after in-reader dequant, decode ≤0.75%. No native packed reader was built; the pilot code was removed. Evidence: strix-dual-exp `evidence/kv1-drift`. |
 +| HC inject partials fused into the combine (TP2 + single host) | Retained. The F16-norm combine's plain and paired-peer routes also emit the next mixer's inject partials from the normalized values they already hold: the F16 norm row is staged in LDS (aliasing the peer kernel's dead block-row stage) and replayed with the separate pass's exact thread grouping, load order and reduction tree, so the emitted partials are byte-identical and `HcMix` skips its `HcMixEpilogueF16Kernel<false>` pass; separate sibling kernels keep the non-emitting route's codegen unchanged. Operator check exact at 37/2 048 tokens (plain, peer, emitted partials aliasing the consumed logits); single-host dump bit-identical; paired member checksums canonical in every session. The emitting combine costs ~1.7% per call; the separate inject pass halves single-host (376→184 calls at 8k, matched profiles, ≈+0.8% e2e, within session noise) and disappears on TP2. Canary-clean interleaved pairs @32k: **median +2.65% (4/4, full separation; 2 269→2 329 tok/s)**, 8k +2.3% (2/2), decode flat. The MoE-epilogue-fused combine keeps its separate pass: its norm compiles to mixed-precision `v_fma_mix*_f16`, which a source-level replay cannot reproduce bit-exactly. Evidence: strix-dual-exp `evidence/prefill-triage/hcf1`. |
++| F32 mixed-store skip on the wide FFN mixer route | Retained. Every consumer of the FFN mixer's wide-route mixed row reads the F16/Q8 copies the fused projection emits (F16 router path, Q8 shared expert, F16 routed rows), so a `kSkipF32` template sibling of the mix kernel leaves the F32 row unwritten for `MoePart`'s call — the attention mixer keeps the store (its row feeds the BF16 indexer projections and the F32 SSM alpha/beta, which re-read F32 directly), and a cached scan re-enables the store for any F32-typed router or an armed MoE observer. Isolated kernel 580→471 µs at 2 048 tokens (**−18.8%**, F16/Q8/inject outputs byte-identical); route verified by the two instantiation names in a profile (48 skip + 48 keep per chunk). Operator check adds the skip variant with a sentinel F32 row; single-host logit dump bit-identical (canonical `8ddefb67…`). Canary-clean interleaved TP2 pairs @32k: **median +0.86% (4v4; 2 310→2 330 tok/s**, not fully separated), 8k even, decode flat (the wide fused route never runs in decode), member checksums canonical on both ranks. Retained on kernel evidence — a pure store removal with zero arithmetic change — though below the 1% paired bar. |
++| HC projection stage-depth variants (barrier merge) | Rejected. Deepening the LDS K-stage of the fused HC kernels to cut the two-`__syncthreads`-per-stage count: the mix kernel at BK=2 (24→48 KB stage) runs **−9.3%** (471→522 µs @2 048 tokens, skip-F32 route) and the HC down at BK=8 (80→40 stages, 27.6→55.3 KB, bit-exact hash) runs **−19.2%** (401→478 µs) — the occupancy loss dominates the barrier saving, and both kernels sit at their practical WMMA ceilings for these shapes (28.5/33.5 TFLOPS-equivalent). The up epilogue's two barriers per 16-token group are the data-flow minimum at the 24 KB stage (a double-buffered `gates` plane needs 33.3 KB). Screening also exposed that `W8A8BlockedWmmaGEMMKernel`'s weight-fetch count floors `(BM·BK)/256` without a bounds check — BK=5/6 instantiations silently computed on unstaged rows — now guarded by `static_assert((BM·BK) % 256 == 0)`; `dense_gemm_bench` gained the previously missing HC-down case. Evidence: strix-dual-exp `evidence/prefill-triage/hc-v2`. |
  
  Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
  to dense projections and 12.6% to attention/indexing. Final-tile catch-up
-@@ -113,3 +118,41 @@ Development measurements, not published cells.
+@@ -113,3 +120,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -1212,7 +1214,7 @@ index b103e94..5b6e95f 100644
  };
  
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
-index 506db2c..b1a0d06 100644
+index 506db2c..8e9af25 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
 @@ -622,6 +622,550 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
@@ -1998,7 +2000,17 @@ index 506db2c..b1a0d06 100644
  __global__ void WaitValueKernel(const std::uint64_t* flag, std::uint64_t value,
                                  std::uint64_t ticks, std::uint32_t* timed_out) {
    const std::uint64_t start = wall_clock64();
-@@ -4577,6 +5245,19 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
+@@ -3574,6 +4242,9 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
+   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
+   static_assert(BN / 16 <= 8,
+                 "the activation stage assigns one wave per token subtile");
++  // The weight fetch maps BM * BK units onto 256 threads exactly; other
++  // multiples leave rows unstaged (floor) or write past the stage (ceil).
++  static_assert((BM * BK) % 256 == 0, "stage must fill whole threads");
+   constexpr int kRowTiles = BM / 16;
+   constexpr int kTokTiles = BN / 16;
+   constexpr int kWaveRowTiles = kRowTiles / WM;
+@@ -4577,6 +5248,19 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
    }
  }
  
@@ -2018,7 +2030,7 @@ index 506db2c..b1a0d06 100644
  void HcCombine(float* res, const float* block_out, const float* inject,
                 std::uint32_t inject_parts, const float* gamma, float* xn,
                 std::uint32_t n_tokens, std::uint32_t hidden,
-@@ -4617,9 +5298,17 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
+@@ -4617,9 +5301,17 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
  void HcCombineF16(float* res, const float* block_out, const float* inject,
                    std::uint32_t inject_parts, const float* gamma, __half* xn,
                    void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
@@ -2037,7 +2049,7 @@ index 506db2c..b1a0d06 100644
      hipLaunchKernelGGL(HcCombineVec4Kernel<__half>, dim3(n_tokens),
                         dim3(kThreads), 0, stream, res, block_out, inject,
                         inject_parts, gamma, xn, xn_q8, hidden, eps);
-@@ -4630,6 +5319,51 @@ void HcCombineF16(float* res, const float* block_out, const float* inject,
+@@ -4630,6 +5322,51 @@ void HcCombineF16(float* res, const float* block_out, const float* inject,
                       inject_parts, gamma, xn, xn_q8, hidden, streams, eps);
  }
  
@@ -2089,7 +2101,7 @@ index 506db2c..b1a0d06 100644
  void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream) {
    hipLaunchKernelGGL(SiluScaleKernel, dim3(Blocks(count)), dim3(kThreads), 0,
                       stream, x, scale, count);
-@@ -4960,7 +5694,7 @@ struct AttentionProjectionOutput {
+@@ -4960,7 +5697,7 @@ struct AttentionProjectionOutput {
  /// and use the same ordered K16 products. y is [batch][m].
  template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
           bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
@@ -2098,7 +2110,7 @@ index 506db2c..b1a0d06 100644
  __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
      const void* __restrict__ w, const __half* __restrict__ x,
      float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
-@@ -5379,7 +6113,12 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
+@@ -5379,7 +6116,12 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
            value.y *= 0.25F;
            value.z *= 0.25F;
            value.w *= 0.25F;
@@ -2112,7 +2124,7 @@ index 506db2c..b1a0d06 100644
            if (mixed_half != nullptr) {
              *reinterpret_cast<__half2*>(mixed_half + token * hidden + h) =
                  __floats2half2_rn(value.x, value.y);
-@@ -5574,17 +6313,24 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
+@@ -5574,17 +6316,24 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
  bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
                    const float* inject_w, float* mixed, __half* mixed_half,
                    void* mixed_q8, float* inject, std::uint32_t n_tokens,
@@ -2142,7 +2154,7 @@ index 506db2c..b1a0d06 100644
    if (inject_w != nullptr) {
      const dim3 inject_grid(HcInjectPartsVec4(hidden), n_tokens);
      hipLaunchKernelGGL((HcMixEpilogueF16Kernel<false>), inject_grid,
-@@ -5652,6 +6398,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
+@@ -5652,6 +6401,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
        // changes.
        hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1, 5>), grid,
                           dim3(kThreads), 0, stream, w, x, out, batch, m, k);
@@ -2155,7 +2167,7 @@ index 506db2c..b1a0d06 100644
      } else if (batch >= 1024 && (m == 16384 || m == 13312) && k == 2560) {
        // Eight row groups reuse each weight fragment across all token tiles
        // and keep fewer weight fragments live. K accumulation is unchanged.
-@@ -5873,9 +6625,18 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
+@@ -5873,9 +6628,18 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
          dim3(Blocks(static_cast<std::size_t>(n_tokens) * v_heads)),
          dim3(kThreads), 0, stream, alpha_beta, a, dt, kn,
          static_cast<std::size_t>(n_tokens) * v_heads, v_heads);
@@ -2177,7 +2189,7 @@ index 506db2c..b1a0d06 100644
    } else {
      hipLaunchKernelGGL(GdnPrepKernel<false>,
                         dim3((n_tokens * k_heads + waves - 1) / waves),
-@@ -6194,6 +6955,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
+@@ -6194,6 +6958,20 @@ void AddRowsBroadcast(const float* addend, float* residual,
                       stream, addend, residual, hidden, streams);
  }
  
@@ -2198,7 +2210,7 @@ index 506db2c..b1a0d06 100644
  void StagePartial(const float* partial, float* send, std::size_t count,
                    std::uint32_t* arrivals, std::uint64_t* ready,
                    std::uint64_t value, hipStream_t stream) {
-@@ -6204,6 +6979,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
+@@ -6204,6 +6982,29 @@ void StagePartial(const float* partial, float* send, std::size_t count,
                       stream, partial, send, count, arrivals, ready, value);
  }
  
@@ -4192,7 +4204,7 @@ index 6ee40b2..9d8edd9 100644
 +    gufo_qwen38_flash_next hip::host)
  endif()
 diff --git a/tests/models/qwen38_flash_next/dense_gemm_bench.cpp b/tests/models/qwen38_flash_next/dense_gemm_bench.cpp
-index ffd4e76..f3dfb20 100644
+index ffd4e76..c86a1a1 100644
 --- a/tests/models/qwen38_flash_next/dense_gemm_bench.cpp
 +++ b/tests/models/qwen38_flash_next/dense_gemm_bench.cpp
 @@ -238,8 +238,8 @@ int main(int argc, char** argv) try {
@@ -4206,7 +4218,7 @@ index ffd4e76..f3dfb20 100644
              throw std::runtime_error("AttentionF16Gemm");
          },
          reps);
-@@ -254,6 +254,49 @@ int main(int argc, char** argv) try {
+@@ -254,6 +254,78 @@ int main(int argc, char** argv) try {
        CheckHip(hipFree(p), "hipFree");
    }
  
@@ -4250,6 +4262,35 @@ index ffd4e76..f3dfb20 100644
 +         {static_cast<void*>(w), static_cast<void*>(low),
 +          static_cast<void*>(xn), static_cast<void*>(mixed),
 +          static_cast<void*>(mixed_half), static_cast<void*>(mixed_q8)})
++      CheckHip(hipFree(p), "hipFree");
++  }
++
++  // Fused HC mixer down projection: Q8_0 320 x 10240 over Q8-tiled
++  // activations, emitting the F16 SiLU-scaled low-rank rows.
++  if (tokens >= 96) {
++    constexpr std::size_t kDownRows = 320;
++    constexpr std::size_t kDownK = 4 * 2560;
++    std::uint32_t seed = 82U;
++    auto* w = Upload(Q8Weights(kDownRows, kDownK, 81U));
++    std::vector<float> x_host(std::size_t{tokens} * kDownK);
++    for (auto& v : x_host)
++      v = static_cast<float>(static_cast<int>(Next(&seed) % 2001) - 1000) /
++          1000.0F;
++    auto* x = Upload(x_host);
++    auto* x_q8 = Zeros(q::Q8TiledBytes(tokens, kDownK));
++    q::QuantizeQ8Tiled(x, x_q8, tokens, kDownK, nullptr);
++    auto* out = static_cast<__half*>(
++        Zeros(std::size_t{tokens} * kDownRows * sizeof(__half)));
++    const double ms = MedianMs(
++        [&] {
++          if (!q::HcDownF16Gemm(w, x_q8, out, tokens, nullptr))
++            throw std::runtime_error("HcDownF16Gemm");
++        },
++        reps);
++    report("hcd", ms, 2.0 * tokens * kDownRows * kDownK,
++           Hash(out, std::size_t{tokens} * kDownRows * sizeof(__half)));
++    for (void* p : {static_cast<void*>(w), static_cast<void*>(x),
++                    static_cast<void*>(x_q8), static_cast<void*>(out)})
 +      CheckHip(hipFree(p), "hipFree");
 +  }
 +
