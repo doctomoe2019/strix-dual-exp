@@ -85,10 +85,10 @@ index 36721bb..17a6d8c 100644
    ],
    "buildPresets": [
 diff --git a/README.md b/README.md
-index 0888c0a..62d884a 100644
+index 0888c0a..8104d35 100644
 --- a/README.md
 +++ b/README.md
-@@ -36,11 +36,12 @@ C1 workload. Audio excludes loading.
+@@ -36,11 +36,14 @@ C1 workload. Audio excludes loading.
  Each model guide lists the required files and complete benchmark settings.
  
  **Two hosts.** Qwen3.8 Flash-Next can also run across two Strix Halo hosts
@@ -98,9 +98,11 @@ index 0888c0a..62d884a 100644
 -It is the only model with multi-host support so far and needs an optional build
 -with libibverbs (`-DGUFO_ENABLE_TP2_RDMA=ON`); see
 +connected by InfiniBand, RoCE v2 or USB4 cables, with tensor parallelism (TP2):
-+faster decode and prefill than one host, and room for checkpoints that do not
-+fit one. It is the only model with multi-host support so far and needs an
-+optional build: libibverbs RDMA (`-DGUFO_ENABLE_TP2_RDMA=ON`) or the
++**~2,300 tok/s prefill** at 32k context over a direct USB4 cable — about 1.5×
++one host, up from ~2,100–2,200 tok/s before the fused HC inject emission —
++while MTP decode throughput stays at one-host level, plus room for checkpoints
++that do not fit one. It is the only model with multi-host support so far and
++needs an optional build: libibverbs RDMA (`-DGUFO_ENABLE_TP2_RDMA=ON`) or the
 +USB4STREAM character device over a direct USB4/Thunderbolt cable
 +(`-DGUFO_ENABLE_TP2_TBSTREAM=ON`, Linux 7.2+); see
  [TP2](docs/models/qwen3.8-flash-next/TP2.md).
