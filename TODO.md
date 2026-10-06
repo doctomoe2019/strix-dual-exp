@@ -144,6 +144,15 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-06 ~20:55 GUFO-PROD RE-ENABLED on the guardian (user call):
+  unit ExecStart = scripts/serve-guardian.sh, SERVE_PORT=15003 (the old
+  serve-prod-native.sh no longer existed; old unit backed up under
+  /root/archive/pre-saga/; start-time drop_caches dropped). Accepted on
+  its first cycle (c1 1991.9 FAST; prod-port canary 2007.0; /ready
+  green). Enabled for boot; rank death or 3 slow cycles → systemd
+  restart after 30 s with a fresh retry budget; wedge recovery stays
+  with the heal chain. Watch item: a slow-plateau draw (see PHASE A)
+  should be preserved for Phase B attribution when it appears.
 - 2026-10-06 ~20:40 SLOW-SESSION PHASE A CLOSED — the guardian's rejections
   were cold-first artifacts, the canary/guardian are reclocked, and a pair
   was accepted and torn down cleanly. Facts
