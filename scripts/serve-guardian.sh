@@ -26,6 +26,9 @@ _dir=$(dirname "$(readlink -f "$0")")
 : "${SERVE_MTP:=/models/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf}"
 : "${SERVE_CONTEXT:=65536}" "${SERVE_SESSIONS:=1}" "${SERVE_PORT:=8080}"
 : "${SERVE_BOOTSTRAP_PORT:=18515}" "${SERVE_CONTROL_PORT:=18516}"
+# Public API model ID override (--served-model-name); empty = the model's
+# own name. The canaries send the same ID.
+: "${SERVE_MODEL_NAME:=}"
 : "${SERVE_CANARY_TPS:=1900}" "${SERVE_CANARY_TOKENS:=8192}"
 : "${SERVE_MAX_RETRIES:=3}" "${SERVE_CONFIRM:=1}"
 RUN_ID=$(date +%Y%m%d-%H%M%S)
@@ -96,7 +99,8 @@ done
 canary() { # $1 log label, $2 warmup flag (1 = unclassified warmup request)
   SERVE_PORT=$SERVE_PORT SERVE_CANARY_TPS=$SERVE_CANARY_TPS \
     SERVE_CANARY_TOKENS=$SERVE_CANARY_TOKENS SERVE_CANARY_LABEL="$1" \
-    SERVE_CANARY_WARMUP="$2" bash "$_dir/serve-canary.sh"
+    SERVE_CANARY_WARMUP="$2" SERVE_MODEL_NAME="$SERVE_MODEL_NAME" \
+    bash "$_dir/serve-canary.sh"
 }
 
 wait_ready() {
@@ -117,6 +121,7 @@ while :; do
     --tp-world-size 2 --tp-transport tbstream \
     --tp-bootstrap-port $SERVE_BOOTSTRAP_PORT --tp-control-port $SERVE_CONTROL_PORT \
     --tp-control-token $TOKEN --context $SERVE_CONTEXT --sessions $SERVE_SESSIONS"
+  [ -n "$SERVE_MODEL_NAME" ] && ARGS="$ARGS --served-model-name $SERVE_MODEL_NAME"
 
   # Rank 1 first (hostB), then rank 0 here; PORT env carries the port.
   # The log directory must exist on both hosts (rank1's redirect happens
