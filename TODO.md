@@ -144,6 +144,13 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~10:20 PROD AT FULL 256k CONTEXT (user flagged: prod must run
+  the model's native 262144, not the 65536 guardian default): set
+  SERVE_CONTEXT=262144 in gufo-prod.service (daemon-reload, restart);
+  pair accepted first cycle (canary FAST 1984.1, logs
+  .../20261007-101846), both ranks log context_tokens=262144, rank1 gpu
+  device 49.0/122.8 GiB. Earlier "65k" reading was the guardian default,
+  not the model limit (GGUF qwen4exp.context_length = 262144 verified).
 - 2026-10-07 ~09:45 DEPLOY a28a6448 (from d3e7ab8, includes the pinned
   rejection-lockstep test + token-accounting refactor): binary replaced on
   BOTH hosts via mv with backup gufo.42fc94e6; systemctl restart
