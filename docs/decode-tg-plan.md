@@ -22,6 +22,20 @@ converged runs beat forced widths (80.8 tok/s), collapsed runs deliver
 continuation is draft-width controller stabilization** (EMA/probe/retry
 dynamics in `mtp_policy.hpp`), not cost tables or concurrency mapping.
 
+**Status 2026-10-08 (overnight) — stabilization leg closed.** Matched-input
+E0 (`evidence/decode-tg/d1-stabilization/`) revised the picture again: the
+controller is **deterministic per request** (three passes bit-identical; the
+"bimodality" was nonce-level workload variation), sits within ~8% of the
+per-request forced-width optimum on hard text and **beats every fixed width
+on easy text**; the loss concentrates in cooldown-retry storms (26% of
+rounds on hard/tools fixtures). An EMA 0.75→0.85 candidate passed gates but
+gained only 0–3.8% per fixture in a 4v4 serving A/B — **rejected** below the
+5% bar. Exact offline policy replay is impossible (catch-up vs mid-chain
+draft-state numerics differ; acceptance streams are policy-dependent). New
+follow-up flagged: **seeded-replay fragility via checkpoint-restored draft
+policy** (candidate showed fixed-seed outputs varying across passes). Phase
+3 (D3/D4 by workload-share data) is the next decision point.
+
 Everything below is either an established measurement (labeled with its
 source), a source-visible mechanism (labeled **unmeasured** — not a claimed
 speedup), or a historical precedent. Published speedups from the papers listed

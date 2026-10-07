@@ -144,6 +144,28 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~00:30 D1-STABILIZATION LEG CLOSED (evidence/decode-tg/
+  d1-stabilization/): matched-input E0 established the controller is
+  DETERMINISTIC per request (3 fresh-process passes bit-identical; the
+  d1-policy "bimodality" was nonce-level workload variation) and within ~8%
+  of the per-request forced-width optimum on hard text while BEATING every
+  fixed width on easy text (decA2 80 vs w7 78.5); the loss concentrates in
+  cooldown-retry storms (210/822 rounds policy-AR on the hard fixture).
+  Forced-width controls confirmed greedy width-invariance bit-exactly and
+  measured per-chain cycle costs (1/3/5/8-row chains: 29.4/29.5/59.3/86.1
+  ms -- narrow verify nearly free). Exact offline policy replay is
+  FALSIFIED: draft-head state after catch-up is not bit-identical to
+  mid-chain state, so acceptance streams are policy-dependent (pos-1252
+  counterexample recorded). EMA 0.75->0.85 candidate (unit-tested, format-
+  clean) gained only 0-3.8% per fixture in a 4v4 ABBA serving A/B with
+  bit-identical greedy outputs -- REJECTED below the 5% bar and reverted
+  (patch preserved). NEW FOLLOW-UP FLAGGED: candidate toolsA1 fixed-seed
+  outputs varied across passes (baseline 4/4 identical) -- seeded replay
+  appears to depend on checkpoint-cache-restored draft-policy state, a
+  latent determinism fragility independent of the rejected change. Ops: one
+  amdgpu-userptr stall wedged the pair mid-E0 (self-recovered; serve-pair
+  stop now waits for remote clear); prod restored + canary green; candidate
+  and diag binaries preserved under /root/probe-d1s-*.
 - 2026-10-07 ~19:45 D1 POLICY EXPERIMENT (evidence/decode-tg/d1-policy/):
   matched full-serving A/B on the diag pair found the C1-vs-C2 cost-curve
   arm is NOT the lever (single run inside the adaptive band) -- instead a
