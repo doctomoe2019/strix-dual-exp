@@ -144,6 +144,28 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~19:45 D1 POLICY EXPERIMENT (evidence/decode-tg/d1-policy/):
+  matched full-serving A/B on the diag pair found the C1-vs-C2 cost-curve
+  arm is NOT the lever (single run inside the adaptive band) -- instead a
+  forced-width serving sweep (diagnostic GUFO_FORCE_DRAFTS build, reverted
+  after) shows (1) optimal width is workload-dependent: repetitive fixture
+  monotone to the 7-draft cap (51.7 -> 76.7/78.0 tok/s), code-shaped peak at
+  w5 and -20% at w7; (2) the production adaptive draft-width controller is
+  BIMODAL per request: converged runs beat every forced width (decA 80.8
+  tok/s at width ~4.2 / 92% acceptance) while collapsed runs deliver ~AR+eps
+  (45 tok/s) -- a 15-45% loss per affected request, and the run-to-run
+  spread explains the historical 73.6-78.1 vs 59.5/45.8 tok/s discrepancy on
+  the same fixture. Mechanism hypothesis: one rejection at a depth hammers
+  its 0.75-EMA estimate to ~0.45 and arms a 16-token AR interval (the
+  policy:AR calls in prod logs). NEXT: D1 continuation = draft-width
+  controller STABILIZATION (mtp_policy.hpp dynamics: slower EMA / Beta
+  counts, >=d evidence attribution, width hysteresis, retry-interval
+  re-costing), measured with this serving harness (decA + codeA + the
+  tools-sampled fixture), gated on seeded sampled replay determinism.
+  Ops: maintenance block closed cleanly, prod restored + canary 72.5 tok/s
+  spec-decoding; diag binaries /root/probe-d1p-{a,b,f} both hosts; launcher
+  gotcha recorded: remote nohup backgrounding hangs this peer's sshd (use a
+  locally-detached foreground ssh instead).
 - 2026-10-07 ~18:40 DECODE PHASE-2 EXECUTED (D2 rejected, D1 measured-closed;
   docs/decode-tg-plan.md status note): D2 selector live-range grids for eager
   narrow TP2 decode were implemented in gufo (bound the score grid when the
