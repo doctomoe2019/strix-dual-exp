@@ -144,6 +144,22 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~07:35 TP2 CONSTRAINED MTP SHIPPED (user-approved campaign):
+  tool/schema requests now decode speculatively over TP2. Root cause of the
+  AR fallback was rank 1 never seeing the constraint; the fix carries a
+  ConstraintRecipe on the control protocol (v18), rank 1 rebuilds the
+  grammar through the same composition code, and the handshake compares
+  constraint-vocabulary fingerprints. Live production: same tools request
+  33.1 -> 52.4 tok/s (spec:22, 64% acceptance). Gates: tp_control_test +
+  tp_executor_test (constrained toy MTP, recipe round trip) PASS;
+  tp2_constraints.py 9/9 on a live pair with drafts on every constrained
+  request (15-36 each). gufo a85e9e4 (decode-mode logging + ignore_eos
+  positional fix found by the audit) + 0b9907a (feature) + 9dcd6d8 (docs);
+  WIP patch regenerated, pushed both remotes. Deployed binary 2d4a43ec
+  BOTH hosts (backup gufo.e82b25db); guardian accepted first cycle.
+  Upstream check: canonical gufo + all TP branches still have the
+  constraint fallback (nothing to backport). Evidence:
+  evidence/prefill-triage/tp2-constrained-mtp/.
 - 2026-10-06 ~20:55 GUFO-PROD RE-ENABLED on the guardian (user call):
   unit ExecStart = scripts/serve-guardian.sh, SERVE_PORT=15003 (the old
   serve-prod-native.sh no longer existed; old unit backed up under
