@@ -144,6 +144,21 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~13:55 CHUNK-ALIGNED CHECKPOINTS RETAINED + DEPLOYED
+  (follow-up to the gap attribution): TextRunnerDescriptor gained
+  prefill_chunk_tokens (Flash-Next runner reports PrefillCapacity);
+  intermediate cache checkpoints round up to chunk multiples and merge,
+  so a lone cold prefill never clamps below the engine's own chunk.
+  Gates: pool toy tests incl. a new aligned-grid case, hosted CPU
+  contract suite PASS; live pair: cold 8k 2235-2237 tok/s @4096-chunks
+  (stock 1969-2032 @2048), 32k unchanged 2247.7, continuation restores
+  from the aligned 8192 checkpoint, snapshots still captured (0.68GB vs
+  0.94GB), constrained MTP healthy (spec, 73.2% acceptance). gufo 3e6ec75
+  + 512f62b (EXPERIMENTS row); WIP patch 15085 lines, secret-clean.
+  DEPLOYED 0d559497 BOTH hosts (backup gufo.a28a6448); guardian accepted
+  first cycle with canary 2221.2 (was ~2000 band) — the +11% cold-prefill
+  recovery is live in prod. session_test GPU gate skipped: devshell
+  GLIBC_2.43 skew (known environmental; hosted suite is the CPU gate).
 - 2026-10-07 ~13:00 PREFILL GAP ATTRIBUTED (matched-probe campaign,
   evidence/prefill-triage/gap/): the ~2300 probe references reproduce on
   today's tree (AR and MTP both 2215-2339 @8k-32k, canonical checksums).

@@ -185,7 +185,7 @@ index b3832f4..46e5f79 100644
  and `previous_response_id` remain unsupported.
  
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..1915be8 100644
+index 0b6a02b..c065f32 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 @@ -46,6 +46,9 @@
@@ -198,7 +198,7 @@ index 0b6a02b..1915be8 100644
  | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
  | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
  | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
-@@ -65,6 +68,12 @@
+@@ -65,6 +68,13 @@
  | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
  | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
  | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
@@ -208,10 +208,11 @@ index 0b6a02b..1915be8 100644
 +| HC projection stage-depth variants (barrier merge) | Rejected. Deepening the LDS K-stage of the fused HC kernels to cut the two-`__syncthreads`-per-stage count: the mix kernel at BK=2 (24→48 KB stage) runs **−9.3%** (471→522 µs @2 048 tokens, skip-F32 route) and the HC down at BK=8 (80→40 stages, 27.6→55.3 KB, bit-exact hash) runs **−19.2%** (401→478 µs) — the occupancy loss dominates the barrier saving, and both kernels sit at their practical WMMA ceilings for these shapes (28.5/33.5 TFLOPS-equivalent). The up epilogue's two barriers per 16-token group are the data-flow minimum at the 24 KB stage (a double-buffered `gates` plane needs 33.3 KB). Screening also exposed that `W8A8BlockedWmmaGEMMKernel`'s weight-fetch count floors `(BM·BK)/256` without a bounds check — BK=5/6 instantiations silently computed on unstaged rows — now guarded by `static_assert((BM·BK) % 256 == 0)`; `dense_gemm_bench` gained the previously missing HC-down case. Evidence: strix-dual-exp `evidence/prefill-triage/hc-v2`. |
 +| Mirrored request constraints for constrained TP2 MTP | Retained. A constrained request (tool grammar or response format) sent only a flag to rank 1, so `TpMirroredRunner::DecodeStep`/`DecodeBatch` fell back to one-token-at-a-time decoding — on the real workload ~64% of generated tokens ran at the AR rate (~33 tok/s). Now the request carries a `ConstraintRecipe` (the response-format source schema and the effective tools with their strict flags, required/parallel, resolved reasoning wrapper and final tool format), rank 1 rebuilds the grammar through the same composition code and binds it to its own vocabulary, and rank 0 waits for rank 1's sequence-correlated admission verdict before scheduling any model work for the request — an unrebuildable recipe or a failed sampler initialization rejects the request cleanly instead of diverging inside collectives. The handshake refuses to pair ranks whose constraint-vocabulary fingerprints (token pieces + stop bits) differ, or whose grammar-composition semantics identity differs (bumped with the native-tool backport). Grammar symbol layouts stay rank-local: only token ids, RNG and verdicts cross the wire, and each rank replays its own grammar state over the same accepted tokens. Native-tool correctness integrated from upstream (#441: native syntax kept for every schema, request-wide JSON fallback removed, delimiter/overlap and implicit-reasoning-end parser fixes, span-preserving tokenization, warm initial-mask reuse — with both TP2 builders adapted to the new `ToolParameters(schema, strict, format)` signature), plus Responses host-tools/namespaces/Codex-field tolerance (#434). Toy-pair coverage includes a constrained multi-token request whose grammar admits exactly one object, the admission-rejection path (channel survives, next request serves), recipe round trips and the flag/recipe coherence check (`tp_executor_test`, `tp_control_test`); the hosted CPU contract suite passes. `tests/functional/tp2_constraints.py` now requires drafts on every constrained MTP request and passed 9/9 on a live pair (tools auto/required/stream, schema buffered/streamed, parallel, mixed; drafts 15–36 per request). Live production pair: the same tool request moved 33.1 → 53.4 tok/s (`decode_modes=spec`, 64% acceptance, `finish=tool_calls`). Evidence: strix-dual-exp `evidence/prefill-triage/tp2-constrained-mtp/`. |
 +| Routed-expert packed weight layouts | Mechanism validated, integration parked. Byte-permuting reorganizations of the routed experts' encoded weights — Q5_1 down read from stage-major metadata/code planes (per K64 stage: 16 B/row of original `(d|m, qh)` records, then 32 B/row of 16-byte-aligned qs payloads) and paired Q4_K gate/up from chunk-major 1 KiB planes within 64-row block groups — preserve every dequantized byte and the accumulation order. Sibling kernel instantiations behind opt-in launch flags; a 512-expert bench with rotating padded routing maps and a raw-copy placement control measures **down −4.1…−7.5% and gate/up −2.1…−4.5%** (byte-identical outputs, controls within ±0.4%) at the production shapes and 1 024–4 096 tokens. Parked rather than retained: the modeled full-rollout effect is ≈+1% end-to-end @32k per rank, below the paired separation bar, while single-copy production residency would require converting every consumer of those tensors (all tile widths, non-paired routes and the MMQ decode vector kernels — the persistent-packed-SSM decode regression is the precedent), and the paired gate/up kernel is roughly half activation-reread-bound, capping weight-layout gains near 4%. The prototype (kernel siblings plus the bench) is preserved as a re-appliable patch in the evidence tree. Evidence: strix-dual-exp `evidence/prefill-triage/routed-w1`. |
++| Prefill-chunk-aligned cache checkpoints | Retained. Intermediate continuation checkpoints sat on a 2 048-token grid regardless of the engine's prefill chunk, so a lone cold prefill clamped at every grid point and ran 2 048-token chunks where TP2's capacity is 4 096 — paired 1 024+1 024 trunk batches lose grouped-expert weight reuse, measured at −10…−12 % on cold ≤8 k prompts through serving (matched-pair attribution, canary band 1 969–2 032 against the probe's 2 282–2 304). The runner now publishes its engine prefill chunk (`TextRunnerDescriptor::prefill_chunk_tokens`, the Flash-Next runner reports `PrefillCapacity()`), and grid positions round up to chunk multiples and merge; runners that report nothing keep the default grid. Gates: pool toy tests including a new aligned-grid case (chunk spans 4 096/4 096/…, mid-prompt edits resume from 4 096 not 2 048/6 144), hosted CPU contract suite; live pair: cold 8 k **2 235–2 237 tok/s with 4 096-token chunks** (stock 1 969–2 032), 32 k unchanged (2 247.7), continuation restores from the aligned 8 192 checkpoint, snapshots still captured (0.68 GB vs 0.94 GB — fewer intermediate copies), constrained MTP healthy. Production canary moved 2 004.8 → **2 221.2**. Single host is unchanged by construction (capacity 2 048 = the grid). Evidence: strix-dual-exp `evidence/prefill-triage/gap`. |
  
  Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
  to dense projections and 12.6% to attention/indexing. Final-tile catch-up
-@@ -113,3 +122,41 @@ Development measurements, not published cells.
+@@ -113,3 +123,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -507,10 +508,18 @@ index 06d290c..a943dc4 100644
                                           "' is not supported on this endpoint");
      }
 diff --git a/src/cli/serve/inference_backend.cpp b/src/cli/serve/inference_backend.cpp
-index 78898e1..3233258 100644
+index 78898e1..c8433fe 100644
 --- a/src/cli/serve/inference_backend.cpp
 +++ b/src/cli/serve/inference_backend.cpp
-@@ -2643,6 +2643,32 @@ public:
+@@ -2579,6 +2579,7 @@ public:
+         .model_id = model_->ModelName(),
+         .state_abi = std::string(kQwenFlashNextStateAbi),
+         .max_context = max_context_,
++        .prefill_chunk_tokens = model_->PrefillCapacity(),
+         .capabilities =
+             TextRunnerCapabilities{
+                 .incremental_prefill = true,
+@@ -2643,6 +2644,32 @@ public:
          });
    }
  
@@ -543,7 +552,7 @@ index 78898e1..3233258 100644
    [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
        std::string_view text) const override {
      return model_->tokenizer().Encode(text);
-@@ -2801,7 +2827,10 @@ public:
+@@ -2801,7 +2828,10 @@ public:
        TextRunnerState& state, std::size_t max_tokens,
        sampling::SamplerState& sampler) const override {
      if (!use_mtp_ || max_tokens == 1) {
@@ -555,7 +564,7 @@ index 78898e1..3233258 100644
      }
      if (max_tokens == 0) {
        throw std::invalid_argument(
-@@ -2834,6 +2863,10 @@ public:
+@@ -2834,6 +2864,10 @@ public:
      step.draft_rounds = stats_after.cycles - stats_before.cycles;
      step.draft_tokens = stats_after.drafted - stats_before.drafted;
      step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
@@ -566,7 +575,7 @@ index 78898e1..3233258 100644
      return step;
    }
  
-@@ -2951,6 +2984,8 @@ public:
+@@ -2951,6 +2985,8 @@ public:
        step.draft_rounds = stats.cycles - before[i].cycles;
        step.draft_tokens = stats.drafted - before[i].drafted;
        step.draft_accepted_tokens = stats.accepted - before[i].accepted;
@@ -575,7 +584,7 @@ index 78898e1..3233258 100644
      }
      return steps;
    }
-@@ -3189,7 +3224,7 @@ struct InferenceBackend::Impl {
+@@ -3189,7 +3225,7 @@ struct InferenceBackend::Impl {
            tool_format_(tool_format),
            tp_(std::move(tp)) {
        if (initial == InitialOutputState::kReasoning)
@@ -584,7 +593,7 @@ index 78898e1..3233258 100644
      }
  
      ~ScheduledGenerationRequest() override {
-@@ -3226,13 +3261,8 @@ struct InferenceBackend::Impl {
+@@ -3226,13 +3262,8 @@ struct InferenceBackend::Impl {
        if (local_error != nullptr) {
          std::rethrow_exception(local_error);
        }
@@ -600,7 +609,7 @@ index 78898e1..3233258 100644
        return result;
      }
  
-@@ -3272,7 +3302,8 @@ struct InferenceBackend::Impl {
+@@ -3272,7 +3303,8 @@ struct InferenceBackend::Impl {
        bool cache_prompt, std::size_t cache_prefix_tokens,
        std::shared_ptr<const TextPromptContext> context, bool return_progress,
        std::optional<sampling::JsonConstraint::ToolFormat> tool_format,
@@ -610,7 +619,7 @@ index 78898e1..3233258 100644
      if (state->tp_runner == nullptr || state->response_broker == nullptr ||
          state->communicator == nullptr || state->scheduler == nullptr) {
        throw std::logic_error("TP2 rank 0 is not fully configured");
-@@ -3308,6 +3339,7 @@ struct InferenceBackend::Impl {
+@@ -3308,6 +3340,7 @@ struct InferenceBackend::Impl {
          .cache_prefix_tokens = static_cast<std::uint32_t>(cache_prefix_tokens),
          .client_id = client_id,
          .sampling = sampling,
@@ -618,7 +627,7 @@ index 78898e1..3233258 100644
          .stop_at_eos = stop_at_eos,
      };
      if (context != nullptr) {
-@@ -3346,6 +3378,16 @@ struct InferenceBackend::Impl {
+@@ -3346,6 +3379,16 @@ struct InferenceBackend::Impl {
        tp_open->fetch_sub(1);
        throw std::runtime_error("TP worker command failed: " + error);
      }
@@ -635,7 +644,7 @@ index 78898e1..3233258 100644
      state->tp_runner->BeginRequest(begin.sequence);
      auto tp = std::make_unique<TpRequest>(state, tp_open, begin.sequence);
      try {
-@@ -3362,6 +3404,7 @@ struct InferenceBackend::Impl {
+@@ -3362,6 +3405,7 @@ struct InferenceBackend::Impl {
                .stop_at_eos = stop_at_eos,
                .stop_sequences = std::move(stop_sequences),
                .return_progress = return_progress,
@@ -643,7 +652,7 @@ index 78898e1..3233258 100644
            });
        return std::make_shared<ScheduledGenerationRequest>(
            state, std::move(scheduled), initial, tool_format, std::move(tp));
-@@ -3383,7 +3426,8 @@ struct InferenceBackend::Impl {
+@@ -3383,7 +3427,8 @@ struct InferenceBackend::Impl {
        std::shared_ptr<const TextPromptContext> context = {},
        bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
        const std::vector<std::string>& stop_sequences = {},
@@ -653,7 +662,7 @@ index 78898e1..3233258 100644
      Result result;
      result.prompt_tokens = prompt_tokens.size();
      result.client_id = client_id.empty() ? "anonymous" : client_id;
-@@ -3400,7 +3444,7 @@ struct InferenceBackend::Impl {
+@@ -3400,7 +3445,7 @@ struct InferenceBackend::Impl {
            current, std::move(prompt_tokens), max_tokens, sampling, is_cancelled,
            static_cast<bool>(on_token), client_id, stop_sequences, initial,
            request_start, cache_prompt, cache_prefix_tokens, std::move(context),
@@ -662,7 +671,7 @@ index 78898e1..3233258 100644
        return generation->Wait(on_token, {}, {});
      }
  
-@@ -3415,6 +3459,7 @@ struct InferenceBackend::Impl {
+@@ -3415,6 +3460,7 @@ struct InferenceBackend::Impl {
              .cache_prompt = cache_prompt,
              .cache_prefix_tokens = cache_prefix_tokens,
              .stop_sequences = stop_sequences,
@@ -670,7 +679,7 @@ index 78898e1..3233258 100644
          });
      ScheduledGenerationRequest generation(std::move(current),
                                            std::move(request), initial);
-@@ -3981,6 +4026,8 @@ bool InferenceBackend::load(
+@@ -3981,6 +4027,8 @@ bool InferenceBackend::load(
            .sessions = static_cast<std::uint32_t>(session_count),
            .vision = has_vision,
            .disk_cache = DiskCacheEnabled(disk_cache_config),
@@ -679,7 +688,7 @@ index 78898e1..3233258 100644
        };
        std::string control_error;
        if (!tp_config.control->Handshake(control_config, &control_error)) {
-@@ -4296,19 +4343,24 @@ InferenceBackend::Result InferenceBackend::chat(
+@@ -4296,19 +4344,24 @@ InferenceBackend::Result InferenceBackend::chat(
      return {};
    }
    auto effective_sampling = sampling_config;
@@ -708,7 +717,7 @@ index 78898e1..3233258 100644
  #else
    (void)request;
    (void)max_tokens;
-@@ -4343,7 +4395,7 @@ InferenceBackend::start_complete(
+@@ -4343,7 +4396,7 @@ InferenceBackend::start_complete(
          is_cancelled, stream_output,
          client_id.empty() ? "anonymous" : std::string(client_id),
          stop_sequences, InitialOutputState::kContent, request_start, true, 0,
@@ -717,7 +726,7 @@ index 78898e1..3233258 100644
    }
    auto scheduled_request = state->scheduler->Submit(
        std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
-@@ -4383,8 +4435,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4383,8 +4436,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
  
    auto effective_sampling = sampling_config;
    std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
@@ -730,7 +739,7 @@ index 78898e1..3233258 100644
    const auto& effective_request = constrained ? *constrained : request;
    auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
    if (!prompt.has_value() || prompt->tokens.empty()) {
-@@ -4394,13 +4448,15 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4394,13 +4449,15 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
  
    const std::string client_id =
        request.client_id.empty() ? "anonymous" : request.client_id;
@@ -749,7 +758,7 @@ index 78898e1..3233258 100644
    }
    auto scheduled_request = state->scheduler->Submit(
        std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
-@@ -4414,6 +4470,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4414,6 +4471,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
            .cache_prefix_tokens = prompt->cache_prefix_tokens,
            .stop_sequences = request.stop_sequences,
            .return_progress = request.return_progress,
@@ -1664,7 +1673,7 @@ index ea17e54..a7ffb3e 100644
  
    class Request {
 diff --git a/src/cli/serve/text_model_runner.cpp b/src/cli/serve/text_model_runner.cpp
-index 175c404..dc4bf24 100644
+index 175c404..0f89a7b 100644
 --- a/src/cli/serve/text_model_runner.cpp
 +++ b/src/cli/serve/text_model_runner.cpp
 @@ -18,22 +18,55 @@
@@ -1783,7 +1792,45 @@ index 175c404..dc4bf24 100644
    return constrained;
  }
  
-@@ -1918,4 +1948,84 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
+@@ -734,22 +764,34 @@ struct TextRunnerPool::Request::Impl {
+           state,
+           std::span<const TextRunnerToken>(prompt).first(prefill_offset));
+     }
+-    const auto capabilities = runner->Descriptor().capabilities;
++    const auto descriptor = runner->Descriptor();
++    const auto& capabilities = descriptor.capabilities;
+     if (capabilities.incremental_prefill && capabilities.prefix_reuse &&
+         capabilities.snapshot && capabilities.fork) {
+       // A reused frontier already bounds the work lost on an edit. Do not
+       // split a short continuation just to copy a nearby grid checkpoint.
+       // Cold long prompts still retain the last grid point for late edits.
+       constexpr std::size_t interval = 2048;
++      // Checkpoints align to the engine's prefill chunk when the runner
++      // publishes it: clamping a lone cold prefill below its own chunk
++      // size made every sub-capacity chunk measurably slower (paired
++      // 1024-token trunk batches lose grouped-expert weight reuse), so a
++      // grid point that is not a multiple rounds up and duplicates merge.
++      const std::size_t align = descriptor.prefill_chunk_tokens > interval
++                                    ? descriptor.prefill_chunk_tokens
++                                    : interval;
+       const auto grid_points = (prompt.size() - 1) / interval;
+       const auto count =
+           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
+       for (std::size_t point = 1; point <= count; ++point) {
+-        const auto position = grid_points * point / count * interval;
++        const auto position =
++            (grid_points * point / count * interval + align - 1) / align *
++            align;
+         if (position > prefill_offset &&
+-            position - prefill_offset >= interval &&
++            position - prefill_offset >= interval && position < prompt.size() &&
+             position != snapshot_tokens.size() &&
+             position != stable_prefix_position &&
++            (checkpoints.empty() || checkpoints.back() != position) &&
+             !lease.HasSnapshotFor(
+                 std::span<const TextRunnerToken>(prompt).first(position)))
+           checkpoints.push_back(position);
+@@ -1918,4 +1960,84 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
                                           context->cache_prefixes);
  }
  
@@ -1869,7 +1916,7 @@ index 175c404..dc4bf24 100644
 +
  }  // namespace gufo::server
 diff --git a/src/cli/serve/text_model_runner.hpp b/src/cli/serve/text_model_runner.hpp
-index de2fae3..5e79ba9 100644
+index de2fae3..3e61f33 100644
 --- a/src/cli/serve/text_model_runner.hpp
 +++ b/src/cli/serve/text_model_runner.hpp
 @@ -15,6 +15,7 @@
@@ -1880,7 +1927,19 @@ index de2fae3..5e79ba9 100644
  #include "src/cli/serve/continuation_cache.hpp"
  #include "src/cli/serve/text_generation_backend.hpp"
  #include "src/core/sampling.hpp"
-@@ -166,6 +167,21 @@ struct TextDecodeSelection {
+@@ -126,6 +127,11 @@ struct TextRunnerDescriptor {
+   std::string model_id;
+   std::string state_abi;
+   std::uint32_t max_context{0};
++  /// Tokens one engine prefill call consumes at most, when the runner
++  /// publishes it. Intermediate cache checkpoints align to multiples of
++  /// this so a lone cold prefill never splits below the engine's own
++  /// chunk; zero keeps checkpoints on the default grid.
++  std::uint32_t prefill_chunk_tokens{0};
+   TextRunnerCapabilities capabilities;
+   std::optional<TextRunnerPersistenceDescriptor> persistence;
+ };
+@@ -166,6 +172,21 @@ struct TextDecodeSelection {
    std::string piece;
  };
  
@@ -1902,7 +1961,7 @@ index de2fae3..5e79ba9 100644
  struct TextDecodeStep {
    std::vector<TextDecodeSelection> selections;
    /// Number of speculative verification rounds actually executed.
-@@ -173,6 +189,8 @@ struct TextDecodeStep {
+@@ -173,6 +194,8 @@ struct TextDecodeStep {
    std::size_t draft_tokens{0};
    std::size_t draft_accepted_tokens{0};
    bool stop{false};
@@ -1911,7 +1970,7 @@ index de2fae3..5e79ba9 100644
    /// Execution actually used for this request, including model-owned subgroup
    /// dispatch. A runner's advertised maximum is not evidence of batching.
    TextExecutionPlan execution_plan{};
-@@ -254,6 +272,12 @@ public:
+@@ -254,6 +277,12 @@ public:
    BuildConstraintVocabulary() const {
      throw std::invalid_argument("model does not support structured output");
    }
@@ -1924,7 +1983,7 @@ index de2fae3..5e79ba9 100644
    [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
        const {
      return sampling::JsonConstraint::ToolFormat::kJson;
-@@ -560,10 +584,21 @@ private:
+@@ -560,10 +589,21 @@ private:
  
  /// Build output constraints and attach server-authored instructions as framing,
  /// preserving client message content and the model's native prompt layout.
@@ -7896,10 +7955,62 @@ index 3e13452..66e7e02 100644
    TestMalformedHistoricalFunctions();
    TestToolClosingFraming();
 diff --git a/tests/cli/text_model_runner_test.cpp b/tests/cli/text_model_runner_test.cpp
-index 9120ec1..d3ea2f8 100644
+index 9120ec1..9cc8ffd 100644
 --- a/tests/cli/text_model_runner_test.cpp
 +++ b/tests/cli/text_model_runner_test.cpp
-@@ -1781,9 +1781,10 @@ void TestServerInstructionsAreFraming() {
+@@ -1166,6 +1166,51 @@ void TestHistoryEditsRestoreIntermediateCheckpoints() {
+   aligned_next.Invalidate();
+ }
+ 
++/// A runner that publishes its engine prefill chunk keeps intermediate
++/// checkpoints on chunk multiples: a lone cold prefill is never clamped
++/// below the engine's own chunk size, and unaligned grid points round up
++/// and merge rather than landing mid-chunk.
++void TestPrefillChunkAlignedCheckpoints() {
++  class ChunkAlignedRunner final : public SnapshotRunner {
++  public:
++    using SnapshotRunner::SnapshotRunner;
++    TextRunnerDescriptor Descriptor() const override {
++      auto descriptor = SnapshotRunner::Descriptor();
++      descriptor.max_context = 32768;
++      descriptor.prefill_chunk_tokens = 4096;
++      return descriptor;
++    }
++  };
++  auto stats = std::make_shared<FakeStats>();
++  TextRunnerPool pool(
++      std::make_shared<ChunkAlignedRunner>(stats, 64, 256, 4096), 1);
++  std::vector<TextRunnerToken> prompt(10000, 1);
++  auto original = pool.Acquire(prompt, {}, {}, {}, true, 9900);
++  stats->prefill_spans.clear();
++  Expect(original.Prefill(32768).consumed_tokens == 4096,
++         "an aligned grid never clamps a cold prefill below the engine chunk");
++  while (!original.prefill_complete())
++    (void)original.Prefill(32768);
++  original.Commit();
++  Expect(
++      stats->prefill_spans == std::vector<std::size_t>({4096, 4096, 1708, 100}),
++      "cold chunks stay at the engine's own size between checkpoints");
++
++  prompt[9000] = 2;
++  auto late_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
++  Expect(late_edit.cache_hit() && late_edit.cached_prompt_tokens() == 8192,
++         "a grid point already on the chunk boundary is kept");
++  while (!late_edit.prefill_complete())
++    (void)late_edit.Prefill(32768);
++  late_edit.Commit();
++
++  prompt[6500] = 3;
++  auto mid_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
++  Expect(mid_edit.cache_hit() && mid_edit.cached_prompt_tokens() == 4096,
++         "unaligned grid points round up and merge into chunk multiples");
++  mid_edit.Invalidate();
++}
++
+ /// A client that rewrites the assistant turn, as one that drops reasoning
+ /// does, diverges after the previous turn's stable boundary. Each warm turn
+ /// must therefore checkpoint its own boundary: if only the reused frontier is
+@@ -1781,9 +1826,10 @@ void TestServerInstructionsAreFraming() {
    using namespace gufo::tokenization;
    class ConstraintRunner final : public FakeRunner {
    public:
@@ -7912,7 +8023,7 @@ index 9120ec1..d3ea2f8 100644
      }
      std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
      BuildConstraintVocabulary() const override {
-@@ -1793,7 +1794,16 @@ void TestServerInstructionsAreFraming() {
+@@ -1793,7 +1839,16 @@ void TestServerInstructionsAreFraming() {
                  std::string(1, static_cast<char>(id)), false};
            });
      }
@@ -7930,7 +8041,7 @@ index 9120ec1..d3ea2f8 100644
    std::vector<std::string> vocab;
    for (int i = 0; i < 256; ++i)
      vocab.emplace_back(1, static_cast<char>(i));
-@@ -1928,11 +1938,128 @@ void TestServerInstructionsAreFraming() {
+@@ -1928,11 +1983,128 @@ void TestServerInstructionsAreFraming() {
             R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
    gufo::sampling::SamplingConfig sampling;
    const auto constrained =
@@ -8061,6 +8172,14 @@ index 9120ec1..d3ea2f8 100644
  }  // namespace
  
  int main() {
+@@ -1949,6 +2121,7 @@ int main() {
+   TestWarmChatCheckpointsStopAtTheStableBoundary();
+   TestWarmHitAdvancesTheStableCheckpoint();
+   TestHistoryEditsRestoreIntermediateCheckpoints();
++  TestPrefillChunkAlignedCheckpoints();
+   TestChatFallbackSurvivesSnapshotBudgetPressure();
+   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
+   TestDiskOnlyCaptureReservesBudgetBeforeCommit();
 diff --git a/tests/cli/tp_control_test.cpp b/tests/cli/tp_control_test.cpp
 index e3fcf5a..3d17835 100644
 --- a/tests/cli/tp_control_test.cpp
