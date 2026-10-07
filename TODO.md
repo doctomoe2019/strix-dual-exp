@@ -144,6 +144,24 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~15:30 WORKLOAD-SHAPE CAMPAIGN + PROD CONFIG WIN: measured the
+  real agent shapes through the TP2 stack (evidence/prefill-triage/
+  serve-shapes/). Findings: extensions at depth run 1969-2112 (mostly genuine
+  attention cost); deep edits restore at the divergence point (cached 32825
+  of 32830 — checkpoint granularity is fine); tiny turns pay a 2.3x
+  per-token penalty (431-row chunk, 0.45s absolute); prefill during active
+  decode lost 45% to the default 512-token budget; concurrent prefills lost
+  24% to shredded chunks. FIX DEPLOYED: --prefill-chunk 2048 (SERVE_PREFILL_CHUNK
+  unit env + guardian passthrough) — prefill-during-decode 1234 -> 2022 tok/s
+  on prod (+64%), decode itself improved (73.6 -> 78.1), concurrent +13%,
+  single/cold unaffected (canary 2233.0). 2048 = paired 1024+1024 lanes
+  (C1-optimal). HAZARD FOUND: --prefill-chunk 4096 with concurrent decode
+  POISONS the tbstream communicator (overlapped exchange write timeout,
+  graceful exit, streams survived; logs preserved). Remaining ceilings are
+  modest: interleave ~8% vs sequential (serialization parked below bar),
+  sequential multi-request overhead ~5%, tiny-turn batching small absolute.
+  Next-tier options (cross-request suffix batching, in-prefill checkpoint
+  export, 4096-poisoning root cause) all have bounded gains — see SUMMARY.
 - 2026-10-07 ~13:55 CHUNK-ALIGNED CHECKPOINTS RETAINED + DEPLOYED
   (follow-up to the gap attribution): TextRunnerDescriptor gained
   prefill_chunk_tokens (Flash-Next runner reports PrefillCapacity);

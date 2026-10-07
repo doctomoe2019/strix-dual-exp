@@ -122,6 +122,7 @@ while :; do
     --tp-bootstrap-port $SERVE_BOOTSTRAP_PORT --tp-control-port $SERVE_CONTROL_PORT \
     --tp-control-token $TOKEN --context $SERVE_CONTEXT --sessions $SERVE_SESSIONS"
   [ -n "$SERVE_MODEL_NAME" ] && ARGS="$ARGS --served-model-name $SERVE_MODEL_NAME"
+  [ -n "$SERVE_PREFILL_CHUNK" ] && ARGS="$ARGS --prefill-chunk $SERVE_PREFILL_CHUNK"
 
   # Rank 1 first (hostB), then rank 0 here; PORT env carries the port.
   # The log directory must exist on both hosts (rank1's redirect happens
