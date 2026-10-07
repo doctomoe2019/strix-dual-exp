@@ -144,6 +144,22 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~13:00 PREFILL GAP ATTRIBUTED (matched-probe campaign,
+  evidence/prefill-triage/gap/): the ~2300 probe references reproduce on
+  today's tree (AR and MTP both 2215-2339 @8k-32k, canonical checksums).
+  MTP draft catch-up ±1.5%, input content ~1%, snapshot captures ~0%
+  (2.6 GB captured during a 32k prefill with no rate loss), full serving
+  stack ~2% at 4096-chunk sizes. The one real deficit: the intermediate
+  checkpoint grid (2048-token interval) clamps cold <=8k prefills into
+  2048-token engine chunks -> paired 1024 trunk batches -> -10..12%; a
+  no-clamp diagnostic build recovered 2223-2229 @8k (causal proof,
+  reverted after measurement, prod binary a28a6448 verified
+  byte-identical after rebuild). The E2E-observed 1655-1822 was mostly
+  depth-loaded PARTIAL extension prefill (cache restore + suffix at
+  depth) plus one concurrent pair, not cold prefill. FOLLOW-UP CANDIDATE:
+  round checkpoint positions up to PrefillCapacity multiples (needs
+  cache/continuation gates). Prod restored and healthy after two
+  maintenance blocks (canary 2006).
 - 2026-10-07 ~10:20 PROD AT FULL 256k CONTEXT (user flagged: prod must run
   the model's native 262144, not the 65536 guardian default): set
   SERVE_CONTEXT=262144 in gufo-prod.service (daemon-reload, restart);
