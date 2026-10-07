@@ -138,7 +138,7 @@ index e817093..e34d1db 100644
  | `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
  | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..92aaf9d 100644
+index 0b6a02b..9b1e502 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 @@ -46,6 +46,9 @@
@@ -151,7 +151,7 @@ index 0b6a02b..92aaf9d 100644
  | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
  | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
  | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
-@@ -65,6 +68,11 @@
+@@ -65,6 +68,12 @@
  | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
  | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
  | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
@@ -159,11 +159,12 @@ index 0b6a02b..92aaf9d 100644
 +| HC inject partials fused into the combine (TP2 + single host) | Retained. The F16-norm combine's plain and paired-peer routes also emit the next mixer's inject partials from the normalized values they already hold: the F16 norm row is staged in LDS (aliasing the peer kernel's dead block-row stage) and replayed with the separate pass's exact thread grouping, load order and reduction tree, so the emitted partials are byte-identical and `HcMix` skips its `HcMixEpilogueF16Kernel<false>` pass; separate sibling kernels keep the non-emitting route's codegen unchanged. Operator check exact at 37/2 048 tokens (plain, peer, emitted partials aliasing the consumed logits); single-host dump bit-identical; paired member checksums canonical in every session. The emitting combine costs ~1.7% per call; the separate inject pass halves single-host (376→184 calls at 8k, matched profiles, ≈+0.8% e2e, within session noise) and disappears on TP2. Canary-clean interleaved pairs @32k: **median +2.65% (4/4, full separation; 2 269→2 329 tok/s)**, 8k +2.3% (2/2), decode flat. The MoE-epilogue-fused combine keeps its separate pass: its norm compiles to mixed-precision `v_fma_mix*_f16`, which a source-level replay cannot reproduce bit-exactly. Evidence: strix-dual-exp `evidence/prefill-triage/hcf1`. |
 +| F32 mixed-store skip on the wide FFN mixer route | Retained. Every consumer of the FFN mixer's wide-route mixed row reads the F16/Q8 copies the fused projection emits (F16 router path, Q8 shared expert, F16 routed rows), so a `kSkipF32` template sibling of the mix kernel leaves the F32 row unwritten for `MoePart`'s call — the attention mixer keeps the store (its row feeds the BF16 indexer projections and the F32 SSM alpha/beta, which re-read F32 directly), and a cached scan re-enables the store for any F32-typed router or an armed MoE observer. Isolated kernel 580→471 µs at 2 048 tokens (**−18.8%**, F16/Q8/inject outputs byte-identical); route verified by the two instantiation names in a profile (48 skip + 48 keep per chunk). Operator check adds the skip variant with a sentinel F32 row; single-host logit dump bit-identical (canonical `8ddefb67…`). Canary-clean interleaved TP2 pairs @32k: **median +0.86% (4v4; 2 310→2 330 tok/s**, not fully separated), 8k even, decode flat (the wide fused route never runs in decode), member checksums canonical on both ranks. Retained on kernel evidence — a pure store removal with zero arithmetic change — though below the 1% paired bar. |
 +| HC projection stage-depth variants (barrier merge) | Rejected. Deepening the LDS K-stage of the fused HC kernels to cut the two-`__syncthreads`-per-stage count: the mix kernel at BK=2 (24→48 KB stage) runs **−9.3%** (471→522 µs @2 048 tokens, skip-F32 route) and the HC down at BK=8 (80→40 stages, 27.6→55.3 KB, bit-exact hash) runs **−19.2%** (401→478 µs) — the occupancy loss dominates the barrier saving, and both kernels sit at their practical WMMA ceilings for these shapes (28.5/33.5 TFLOPS-equivalent). The up epilogue's two barriers per 16-token group are the data-flow minimum at the 24 KB stage (a double-buffered `gates` plane needs 33.3 KB). Screening also exposed that `W8A8BlockedWmmaGEMMKernel`'s weight-fetch count floors `(BM·BK)/256` without a bounds check — BK=5/6 instantiations silently computed on unstaged rows — now guarded by `static_assert((BM·BK) % 256 == 0)`; `dense_gemm_bench` gained the previously missing HC-down case. Evidence: strix-dual-exp `evidence/prefill-triage/hc-v2`. |
++| Mirrored request constraints for constrained TP2 MTP | Retained. A constrained request (tool grammar or response format) sent only a flag to rank 1, so `TpMirroredRunner::DecodeStep`/`DecodeBatch` fell back to one-token-at-a-time decoding — on the real workload ~64% of generated tokens ran at the AR rate (~33 tok/s). Now the request carries a `ConstraintRecipe` (the response-format source schema and the effective tools with their strict flags, required/parallel, resolved reasoning wrapper and final tool format) over the control protocol (v18), rank 1 rebuilds the grammar through the same composition code and binds it to its own vocabulary, and the handshake refuses to pair ranks whose constraint-vocabulary fingerprints (token pieces + stop bits) differ. A recipe that cannot be rebuilt fails the pair before any model call instead of diverging inside collectives. Grammar symbol layouts stay rank-local: only token ids, RNG and verdicts cross the wire, and each rank replays its own grammar state over the same accepted tokens. Toy-pair coverage includes a constrained multi-token request whose grammar admits exactly one object, a recipe round trip and the flag/recipe coherence check (`tp_executor_test`, `tp_control_test`); `tests/functional/tp2_constraints.py` now requires drafts on every constrained MTP request and passed 9/9 on a live pair (tools auto/required/stream, schema buffered/streamed, parallel, mixed; drafts 15–36 per request). Live production pair: the same tool request moved 33.1 → 52.4 tok/s (`decode_modes=spec:22/constr:0`, 64% acceptance). Evidence: strix-dual-exp `evidence/prefill-triage/tp2-constrained-mtp/`. |
 +| Routed-expert packed weight layouts | Mechanism validated, integration parked. Byte-permuting reorganizations of the routed experts' encoded weights — Q5_1 down read from stage-major metadata/code planes (per K64 stage: 16 B/row of original `(d|m, qh)` records, then 32 B/row of 16-byte-aligned qs payloads) and paired Q4_K gate/up from chunk-major 1 KiB planes within 64-row block groups — preserve every dequantized byte and the accumulation order. Sibling kernel instantiations behind opt-in launch flags; a 512-expert bench with rotating padded routing maps and a raw-copy placement control measures **down −4.1…−7.5% and gate/up −2.1…−4.5%** (byte-identical outputs, controls within ±0.4%) at the production shapes and 1 024–4 096 tokens. Parked rather than retained: the modeled full-rollout effect is ≈+1% end-to-end @32k per rank, below the paired separation bar, while single-copy production residency would require converting every consumer of those tensors (all tile widths, non-paired routes and the MMQ decode vector kernels — the persistent-packed-SSM decode regression is the precedent), and the paired gate/up kernel is roughly half activation-reread-bound, capping weight-layout gains near 4%. The prototype (kernel siblings plus the bench) is preserved as a re-appliable patch in the evidence tree. Evidence: strix-dual-exp `evidence/prefill-triage/routed-w1`. |
  
  Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
  to dense projections and 12.6% to attention/indexing. Final-tile catch-up
-@@ -113,3 +121,41 @@ Development measurements, not published cells.
+@@ -113,3 +122,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -356,6 +357,348 @@ index 0ba555c..00a2b92 100644
          }
        );
  
+diff --git a/src/cli/serve/constraint_recipe.hpp b/src/cli/serve/constraint_recipe.hpp
+new file mode 100644
+index 0000000..69df99b
+--- /dev/null
++++ b/src/cli/serve/constraint_recipe.hpp
+@@ -0,0 +1,45 @@
++#ifndef GUFO_SERVER_CONSTRAINT_RECIPE_HPP_
++#define GUFO_SERVER_CONSTRAINT_RECIPE_HPP_
++
++#include <string>
++#include <vector>
++
++namespace gufo::server {
++
++/// Serializable description of a request's effective output constraint, so a
++/// TP2 peer can rebuild the same grammar and run constrained multi-token
++/// decode cycles. It carries the effective construction inputs rather than a
++/// compiled program: grammar symbol layouts never cross the wire, because
++/// each rank walks its own grammar state over the same accepted tokens and
++/// only token ids, RNG and verdicts are exchanged.
++struct ConstraintRecipe {
++  struct Tool {
++    std::string name;
++    /// Dumped JSON schema of the tool's parameters.
++    std::string parameters_json;
++    bool strict{false};
++
++    bool operator==(const Tool&) const = default;
++  };
++
++  bool present{false};
++  /// Response-format grammar: 0 none, 1 a plain JSON object, 2 a schema.
++  int response_kind{0};
++  /// Dumped JSON schema; empty unless `response_kind` is 2.
++  std::string response_schema;
++  bool response_strict{false};
++  std::vector<Tool> tools;
++  bool tool_required{false};
++  /// Effective parallel-tool setting, after the response-format rule.
++  bool parallel{false};
++  /// The resolved reasoning-wrapper decision of the admitting rank.
++  bool reasoning{false};
++  /// `JsonConstraint::ToolFormat` of the admitting rank, after any fallback.
++  int format{0};
++
++  bool operator==(const ConstraintRecipe&) const = default;
++};
++
++}  // namespace gufo::server
++
++#endif  // GUFO_SERVER_CONSTRAINT_RECIPE_HPP_
+diff --git a/src/cli/serve/generation_metrics.hpp b/src/cli/serve/generation_metrics.hpp
+index 7af2cf3..4b92826 100644
+--- a/src/cli/serve/generation_metrics.hpp
++++ b/src/cli/serve/generation_metrics.hpp
+@@ -165,6 +165,15 @@ inline std::string GenerationLogDetails(
+   if (result.draft_tokens > 0)
+     out << " acceptance_pct="
+         << 100.0 * result.draft_accepted_tokens / result.draft_tokens;
++  out << " decode_modes=spec:" << result.decode_steps_speculative
++      << "/constr:" << result.decode_steps_ar_constraint
++      << "/policy:" << result.decode_steps_ar_policy
++      << "/budget:" << result.decode_steps_ar_budget
++      << "/unavail:" << result.decode_steps_ar_unavailable
++      << " stream=" << (result.requested_stream ? 1 : 0)
++      << " sampling=" << (result.sampling_random ? "random" : "greedy")
++      << " constraint=" << (result.constrained ? 1 : 0)
++      << " tools=" << result.tools;
+   if (result.cache_snapshot_bytes > 0)
+     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
+   if (result.cache_disk_queued_bytes > 0)
+diff --git a/src/cli/serve/inference_backend.cpp b/src/cli/serve/inference_backend.cpp
+index 78898e1..82bd822 100644
+--- a/src/cli/serve/inference_backend.cpp
++++ b/src/cli/serve/inference_backend.cpp
+@@ -2643,6 +2643,32 @@ public:
+         });
+   }
+ 
++  [[nodiscard]] std::string ConstraintVocabularyFingerprint() const override {
++    // FNV-1a over exactly what BuildConstraintVocabulary reads: token id,
++    // piece bytes and stop bit. A TP2 pair refuses constrained decoding when
++    // these disagree, because each rank replays the grammar against its own
++    // tokenizer.
++    const auto& tokenizer = model_->tokenizer();
++    const auto size = tokenizer.GetVocabSize();
++    std::uint64_t hash = 1469598103934665603ULL;
++    const auto mix = [&hash](const void* data, std::size_t bytes) {
++      for (const auto byte :
++           std::span(static_cast<const std::uint8_t*>(data), bytes)) {
++        hash ^= byte;
++        hash *= 1099511628211ULL;
++      }
++    };
++    mix(&size, sizeof(size));
++    for (std::uint32_t id = 0; id < size; ++id) {
++      const auto piece = tokenizer.DecodeTokenCopy(id);
++      mix(&id, sizeof(id));
++      mix(piece.data(), piece.size());
++      const bool stop = tokenizer.IsStopToken(id);
++      mix(&stop, sizeof(stop));
++    }
++    return std::to_string(hash);
++  }
++
+   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+       std::string_view text) const override {
+     return model_->tokenizer().Encode(text);
+@@ -2801,7 +2827,10 @@ public:
+       TextRunnerState& state, std::size_t max_tokens,
+       sampling::SamplerState& sampler) const override {
+     if (!use_mtp_ || max_tokens == 1) {
+-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
++      auto step = TextModelRunner::DecodeStep(state, max_tokens, sampler);
++      step.mode = !use_mtp_ ? TextDecodeMode::kArUnavailable
++                            : TextDecodeMode::kArBudget;
++      return step;
+     }
+     if (max_tokens == 0) {
+       throw std::invalid_argument(
+@@ -2834,6 +2863,10 @@ public:
+     step.draft_rounds = stats_after.cycles - stats_before.cycles;
+     step.draft_tokens = stats_after.drafted - stats_before.drafted;
+     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
++    // With MTP enabled and a multi-token budget, a cycle that ran no
++    // verification chose zero proposals (draft-policy cooldown).
++    step.mode = step.draft_rounds > 0 ? TextDecodeMode::kSpeculative
++                                      : TextDecodeMode::kArPolicy;
+     return step;
+   }
+ 
+@@ -2951,6 +2984,8 @@ public:
+       step.draft_rounds = stats.cycles - before[i].cycles;
+       step.draft_tokens = stats.drafted - before[i].drafted;
+       step.draft_accepted_tokens = stats.accepted - before[i].accepted;
++      step.mode = step.draft_rounds > 0 ? TextDecodeMode::kSpeculative
++                                        : TextDecodeMode::kArPolicy;
+     }
+     return steps;
+   }
+@@ -3272,7 +3307,8 @@ struct InferenceBackend::Impl {
+       bool cache_prompt, std::size_t cache_prefix_tokens,
+       std::shared_ptr<const TextPromptContext> context, bool return_progress,
+       std::optional<sampling::JsonConstraint::ToolFormat> tool_format,
+-      bool stop_at_eos = true) const {
++      std::size_t tools = 0, bool stop_at_eos = true,
++      ConstraintRecipe recipe = {}) const {
+     if (state->tp_runner == nullptr || state->response_broker == nullptr ||
+         state->communicator == nullptr || state->scheduler == nullptr) {
+       throw std::logic_error("TP2 rank 0 is not fully configured");
+@@ -3308,6 +3344,7 @@ struct InferenceBackend::Impl {
+         .cache_prefix_tokens = static_cast<std::uint32_t>(cache_prefix_tokens),
+         .client_id = client_id,
+         .sampling = sampling,
++        .recipe = std::move(recipe),
+         .stop_at_eos = stop_at_eos,
+     };
+     if (context != nullptr) {
+@@ -3362,6 +3399,7 @@ struct InferenceBackend::Impl {
+               .stop_at_eos = stop_at_eos,
+               .stop_sequences = std::move(stop_sequences),
+               .return_progress = return_progress,
++              .tools = tools,
+           });
+       return std::make_shared<ScheduledGenerationRequest>(
+           state, std::move(scheduled), initial, tool_format, std::move(tp));
+@@ -3383,7 +3421,8 @@ struct InferenceBackend::Impl {
+       std::shared_ptr<const TextPromptContext> context = {},
+       bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
+       const std::vector<std::string>& stop_sequences = {},
+-      InitialOutputState initial = InitialOutputState::kContent) const {
++      InitialOutputState initial = InitialOutputState::kContent,
++      std::size_t tools = 0, ConstraintRecipe recipe = {}) const {
+     Result result;
+     result.prompt_tokens = prompt_tokens.size();
+     result.client_id = client_id.empty() ? "anonymous" : client_id;
+@@ -3400,7 +3439,7 @@ struct InferenceBackend::Impl {
+           current, std::move(prompt_tokens), max_tokens, sampling, is_cancelled,
+           static_cast<bool>(on_token), client_id, stop_sequences, initial,
+           request_start, cache_prompt, cache_prefix_tokens, std::move(context),
+-          false, std::nullopt);
++          false, std::nullopt, tools, true, std::move(recipe));
+       return generation->Wait(on_token, {}, {});
+     }
+ 
+@@ -3415,6 +3454,7 @@ struct InferenceBackend::Impl {
+             .cache_prompt = cache_prompt,
+             .cache_prefix_tokens = cache_prefix_tokens,
+             .stop_sequences = stop_sequences,
++            .tools = tools,
+         });
+     ScheduledGenerationRequest generation(std::move(current),
+                                           std::move(request), initial);
+@@ -3981,6 +4021,7 @@ bool InferenceBackend::load(
+           .sessions = static_cast<std::uint32_t>(session_count),
+           .vision = has_vision,
+           .disk_cache = DiskCacheEnabled(disk_cache_config),
++          .vocabulary_fingerprint = runner->ConstraintVocabularyFingerprint(),
+       };
+       std::string control_error;
+       if (!tp_config.control->Handshake(control_config, &control_error)) {
+@@ -4296,19 +4337,24 @@ InferenceBackend::Result InferenceBackend::chat(
+     return {};
+   }
+   auto effective_sampling = sampling_config;
++  std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
+   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+-                                          &effective_sampling);
++                                          &effective_sampling, &tool_format);
+   const auto& effective_request = constrained ? *constrained : request;
+   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
+   if (!prompt.has_value() || prompt->tokens.empty()) {
+     return {};
+   }
++  const auto initial =
++      state->scheduler->runner().InitialOutputState(effective_request);
++  const auto recipe = DescribeConstraint(
++      request, tool_format, initial == InitialOutputState::kReasoning);
+   return impl_->GenerateScheduled(
+       state, std::move(prompt->tokens), request_start, max_tokens,
+       effective_sampling, is_cancelled, on_token, request.client_id,
+       std::move(prompt->context), request.cache_prompt,
+-      prompt->cache_prefix_tokens, request.stop_sequences,
+-      state->scheduler->runner().InitialOutputState(effective_request));
++      prompt->cache_prefix_tokens, request.stop_sequences, initial,
++      request.tools.size(), recipe);
+ #else
+   (void)request;
+   (void)max_tokens;
+@@ -4343,7 +4389,7 @@ InferenceBackend::start_complete(
+         is_cancelled, stream_output,
+         client_id.empty() ? "anonymous" : std::string(client_id),
+         stop_sequences, InitialOutputState::kContent, request_start, true, 0,
+-        nullptr, return_progress, std::nullopt, !ignore_eos);
++        nullptr, return_progress, std::nullopt, 0, !ignore_eos);
+   }
+   auto scheduled_request = state->scheduler->Submit(
+       std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
+@@ -4394,13 +4440,17 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+ 
+   const std::string client_id =
+       request.client_id.empty() ? "anonymous" : request.client_id;
++  const auto initial =
++      state->scheduler->runner().InitialOutputState(effective_request);
++  const auto recipe = DescribeConstraint(
++      request, tool_format, initial == InitialOutputState::kReasoning);
+   if (state->control != nullptr) {
+     return impl_->StartTpRequest(
+         state, std::move(prompt->tokens), max_tokens, effective_sampling,
+-        is_cancelled, stream_output, client_id, request.stop_sequences,
+-        state->scheduler->runner().InitialOutputState(effective_request),
++        is_cancelled, stream_output, client_id, request.stop_sequences, initial,
+         request_start, request.cache_prompt, prompt->cache_prefix_tokens,
+-        std::move(prompt->context), request.return_progress, tool_format);
++        std::move(prompt->context), request.return_progress, tool_format,
++        request.tools.size(), true, recipe);
+   }
+   auto scheduled_request = state->scheduler->Submit(
+       std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
+@@ -4414,6 +4464,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+           .cache_prefix_tokens = prompt->cache_prefix_tokens,
+           .stop_sequences = request.stop_sequences,
+           .return_progress = request.return_progress,
++          .tools = request.tools.size(),
+       });
+   return std::make_shared<Impl::ScheduledGenerationRequest>(
+       state, std::move(scheduled_request),
+diff --git a/src/cli/serve/openai_chat.cpp b/src/cli/serve/openai_chat.cpp
+index 3bbc0b4..97af8ed 100644
+--- a/src/cli/serve/openai_chat.cpp
++++ b/src/cli/serve/openai_chat.cpp
+@@ -788,6 +788,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
+     output->chat.response_format =
+         ParseResponseFormat(body.find("response_format"));
+     if (output->chat.response_format) {
++      const auto source = DescribeResponseFormat(body.find("response_format"));
++      output->chat.response_format_object = source.object;
++      output->chat.response_format_json = std::move(source.schema);
++      output->chat.response_format_strict = source.strict;
+       if (const auto* specification =
+               body.find("response_format")->find("json_schema"))
+         output->chat.response_format_description =
+@@ -3038,8 +3042,13 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
+                      "invalid_response_format");
+       try {
+         chat->response_format = ParseResponseFormat(&value, true);
+-        if (chat->response_format)
++        if (chat->response_format) {
++          const auto source = DescribeResponseFormat(&value);
++          chat->response_format_object = source.object;
++          chat->response_format_json = std::move(source.schema);
++          chat->response_format_strict = source.strict;
+           chat->response_format_description = value.member_str("description");
++        }
+       } catch (const std::exception& error) {
+         return Error(400, "Bad Request", error.what(),
+                      "invalid_response_format");
+diff --git a/src/cli/serve/response_format.hpp b/src/cli/serve/response_format.hpp
+index 7fa60e9..f7d526a 100644
+--- a/src/cli/serve/response_format.hpp
++++ b/src/cli/serve/response_format.hpp
+@@ -69,6 +69,40 @@ inline std::shared_ptr<const sampling::JsonConstraint> ParseResponseFormat(
+   return sampling::JsonConstraint::Compile(*schema,
+                                            strict && strict->as_bool());
+ }
++
++/// The source `ParseResponseFormat` compiled, for a TP2 peer that must
++/// rebuild the same grammar: the dumped schema and strict flag for
++/// `json_schema`, the object flag for `json_object`, and empty for `text`.
++/// Both spellings are described: Chat nests the specification under
++/// "json_schema", Responses keeps its members at the top level.
++struct ResponseFormatSource {
++  bool object{false};
++  std::string schema;
++  bool strict{false};
++};
++inline ResponseFormatSource DescribeResponseFormat(const json::Value* format) {
++  ResponseFormatSource source;
++  if (!format || !format->is_object())
++    return source;
++  const auto type = format->member_str("type");
++  if (type == "json_object") {
++    source.object = true;
++    return source;
++  }
++  if (type != "json_schema")
++    return source;
++  const json::Value* specification = format->find("json_schema");
++  if (specification == nullptr && format->find("schema") != nullptr)
++    specification = format;
++  if (!specification || !specification->is_object())
++    return source;
++  if (const auto* strict = specification->find("strict");
++      strict && !strict->is_null())
++    source.strict = strict->as_bool();
++  if (const auto* schema = specification->find("schema"))
++    source.schema = schema->dump();
++  return source;
++}
+ }  // namespace gufo::server
+ 
+ #endif
 diff --git a/src/cli/serve/serve.cpp b/src/cli/serve/serve.cpp
 index e21cbbc..f1ca183 100644
 --- a/src/cli/serve/serve.cpp
@@ -598,6 +941,777 @@ index e21cbbc..f1ca183 100644
          std::_Exit(1);
        }
      });
+diff --git a/src/cli/serve/text_generation_backend.hpp b/src/cli/serve/text_generation_backend.hpp
+index 124075e..a531933 100644
+--- a/src/cli/serve/text_generation_backend.hpp
++++ b/src/cli/serve/text_generation_backend.hpp
+@@ -117,6 +117,13 @@ struct ChatRequest {
+   bool return_progress{false};
+   std::vector<std::string> stop_sequences;
+   std::shared_ptr<const sampling::JsonConstraint> response_format;
++  /// Source of `response_format`, retained so a TP2 peer can rebuild the
++  /// same grammar: the dumped `json_schema` schema (empty when absent).
++  std::string response_format_json;
++  /// `response_format` was the `json_object` form, which compiles without a
++  /// schema.
++  bool response_format_object{false};
++  bool response_format_strict{false};
+   std::string response_format_description;
+ };
+ 
+@@ -202,6 +209,14 @@ public:
+     std::size_t draft_rounds{0};
+     std::size_t draft_tokens{0};
+     std::size_t draft_accepted_tokens{0};
++    /// Decode-step accounting: multi-token speculative cycles versus
++    /// single-token fallbacks by reason. Structural first-token preview
++    /// steps are not decode steps and are not counted.
++    std::size_t decode_steps_speculative{0};
++    std::size_t decode_steps_ar_constraint{0};
++    std::size_t decode_steps_ar_budget{0};
++    std::size_t decode_steps_ar_unavailable{0};
++    std::size_t decode_steps_ar_policy{0};
+     std::size_t prefill_tokens{0};
+     std::size_t prefill_chunks{0};
+     std::size_t active_decode_prefill_chunks{0};
+@@ -214,6 +229,12 @@ public:
+     std::size_t requested_logical_concurrency{1};
+     std::size_t physical_execution_width{1};
+     std::size_t max_buffered_output_bytes{0};
++    /// Request shape as admitted, for the completion log.
++    bool requested_stream{false};
++    bool sampling_random{false};
++    /// A grammar is installed (tool calls or structured output).
++    bool constrained{false};
++    std::size_t tools{0};
+     double queue_ms{0.0};
+     /// Part of queue_ms spent waiting for a concurrent request to publish
+     /// the prompt prefix both share.
+diff --git a/src/cli/serve/text_generation_scheduler.cpp b/src/cli/serve/text_generation_scheduler.cpp
+index 72f51c4..0532d4c 100644
+--- a/src/cli/serve/text_generation_scheduler.cpp
++++ b/src/cli/serve/text_generation_scheduler.cpp
+@@ -1169,6 +1169,28 @@ struct TextGenerationScheduler::Impl {
+     }
+   }
+ 
++  void AccountDecodeMode(const std::shared_ptr<ScheduledRequest>& request,
++                         TextDecodeMode mode) {
++    auto& result = request->result;
++    switch (mode) {
++      case TextDecodeMode::kSpeculative:
++        ++result.decode_steps_speculative;
++        break;
++      case TextDecodeMode::kArConstraint:
++        ++result.decode_steps_ar_constraint;
++        break;
++      case TextDecodeMode::kArBudget:
++        ++result.decode_steps_ar_budget;
++        break;
++      case TextDecodeMode::kArUnavailable:
++        ++result.decode_steps_ar_unavailable;
++        break;
++      case TextDecodeMode::kArPolicy:
++        ++result.decode_steps_ar_policy;
++        break;
++    }
++  }
++
+   void StepDecode(const std::shared_ptr<ScheduledRequest>& request) {
+     consecutive_active_prefill_chunks = 0;
+     // A token a batched single-token step selected, but could not advance
+@@ -1212,6 +1234,7 @@ struct TextGenerationScheduler::Impl {
+       request->result.draft_rounds += step.draft_rounds;
+       request->result.draft_tokens += step.draft_tokens;
+       request->result.draft_accepted_tokens += step.draft_accepted_tokens;
++      AccountDecodeMode(request, step.mode);
+ 
+       CheckPreviewResult(request, step);
+       for (const auto& selection : step.selections) {
+@@ -1516,6 +1539,7 @@ struct TextGenerationScheduler::Impl {
+       item.request->result.draft_rounds += step.draft_rounds;
+       item.request->result.draft_tokens += step.draft_tokens;
+       item.request->result.draft_accepted_tokens += step.draft_accepted_tokens;
++      AccountDecodeMode(item.request, step.mode);
+ 
+       bool published = true;
+       try {
+@@ -2014,6 +2038,10 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
+   request->result.prompt_tokens = prompt.size();
+   request->result.token_metrics_recorded = true;
+   request->result.client_id = request->client_id;
++  request->result.requested_stream = publish_token_pieces;
++  request->result.sampling_random = sampling.uses_random_sampling();
++  request->result.constrained = sampling.constraint != nullptr;
++  request->result.tools = metadata.tools;
+   request->result.configured_active_prefill_tokens =
+       impl_->prefill_policy.decode_active_tokens;
+   request->result.requested_logical_concurrency =
+diff --git a/src/cli/serve/text_generation_scheduler.hpp b/src/cli/serve/text_generation_scheduler.hpp
+index ea17e54..a7ffb3e 100644
+--- a/src/cli/serve/text_generation_scheduler.hpp
++++ b/src/cli/serve/text_generation_scheduler.hpp
+@@ -77,6 +77,8 @@ public:
+     bool stop_at_eos{true};
+     std::vector<std::string> stop_sequences;
+     bool return_progress{false};
++    /// Tool definitions the request supplied, for the completion log.
++    std::size_t tools{0};
+   };
+ 
+   class Request {
+diff --git a/src/cli/serve/text_model_runner.cpp b/src/cli/serve/text_model_runner.cpp
+index 175c404..33d8f96 100644
+--- a/src/cli/serve/text_model_runner.cpp
++++ b/src/cli/serve/text_model_runner.cpp
+@@ -18,6 +18,22 @@
+ 
+ namespace gufo::server {
+ 
++namespace {
++
++/// A tool is strict when its definition says so; the HTTP layer preserves
++/// the complete definition for exactly this reading.
++bool ToolIsStrict(const tokenization::ChatTool& tool) {
++  if (tool.definition_json.empty()) {
++    return false;
++  }
++  const auto definition = json::parse(tool.definition_json);
++  const auto* function = definition.find("function");
++  const auto* strict = function ? function->find("strict") : nullptr;
++  return strict && strict->as_bool();
++}
++
++}  // namespace
++
+ std::optional<ChatRequest> ConstrainChatRequest(
+     const ChatRequest& request, const TextModelRunner& runner,
+     sampling::SamplingConfig* sampling,
+@@ -41,9 +57,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
+       const auto definition = tool.definition_json.empty()
+                                   ? json::Value()
+                                   : json::parse(tool.definition_json);
+-      const auto* function = definition.find("function");
+-      const auto* strict = function ? function->find("strict") : nullptr;
+-      const bool enforce = strict && strict->as_bool();
++      const auto enforce = ToolIsStrict(tool);
+       auto schema = json::parse(tool.parameters_json);
+       auto native = sampling::JsonConstraint::ToolParameters(schema, enforce,
+                                                              format, required);
+@@ -1918,4 +1932,121 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
+                                          context->cache_prefixes);
+ }
+ 
++ConstraintRecipe DescribeConstraint(
++    const ChatRequest& request,
++    const std::optional<sampling::JsonConstraint::ToolFormat>& format,
++    bool reasoning) {
++  ConstraintRecipe recipe;
++  recipe.present = request.response_format != nullptr ||
++                   (!request.tools.empty() &&
++                    request.tool_choice != ChatRequest::ToolChoice::kNone);
++  if (!recipe.present) {
++    return recipe;
++  }
++  if (request.response_format) {
++    if (request.response_format_object) {
++      recipe.response_kind = 1;
++    } else {
++      recipe.response_kind = 2;
++      recipe.response_schema = request.response_format_json;
++      recipe.response_strict = request.response_format_strict;
++    }
++  }
++  for (const auto& tool : request.tools) {
++    recipe.tools.push_back(
++        {tool.name, tool.parameters_json, ToolIsStrict(tool)});
++  }
++  recipe.tool_required =
++      request.tool_choice == ChatRequest::ToolChoice::kRequired;
++  recipe.parallel = !request.response_format && request.parallel_tool_calls;
++  recipe.reasoning = reasoning;
++  recipe.format = static_cast<int>(
++      format.value_or(sampling::JsonConstraint::ToolFormat::kJson));
++  return recipe;
++}
++
++std::shared_ptr<const sampling::TokenConstraint> BuildConstraintFromRecipe(
++    const ConstraintRecipe& recipe, const TextModelRunner& runner,
++    std::string* error) {
++  const auto fail = [error](const std::string& message) {
++    if (error != nullptr) {
++      *error = message;
++    }
++    return std::shared_ptr<const sampling::TokenConstraint>{};
++  };
++  if (!recipe.present) {
++    return fail("constraint recipe is absent");
++  }
++  std::shared_ptr<const sampling::JsonConstraint> answer;
++  if (recipe.response_kind == 1) {
++    answer = sampling::JsonConstraint::Object();
++  } else if (recipe.response_kind == 2) {
++    if (recipe.response_schema.empty()) {
++      return fail("response-format schema is missing");
++    }
++    try {
++      answer = sampling::JsonConstraint::Compile(
++          json::parse(recipe.response_schema), recipe.response_strict);
++    } catch (const std::exception& exception) {
++      return fail(std::string("response-format schema is invalid: ") +
++                  exception.what());
++    }
++  } else if (recipe.response_kind != 0) {
++    return fail("response-format kind is invalid");
++  }
++  if (answer == nullptr && recipe.tools.empty()) {
++    return fail("recipe describes no grammar");
++  }
++  const auto bind =
++      [&runner,
++       &fail](std::shared_ptr<const sampling::JsonConstraint> grammar) {
++        try {
++          return runner.BindConstraint(std::move(grammar));
++        } catch (const std::exception& exception) {
++          return fail(std::string("constraint vocabulary is unavailable: ") +
++                      exception.what());
++        }
++      };
++  if (recipe.tools.empty()) {
++    return bind(recipe.reasoning
++                    ? sampling::JsonConstraint::WithReasoning(answer)
++                    : answer);
++  }
++  if (recipe.format < 0 ||
++      recipe.format >
++          static_cast<int>(sampling::JsonConstraint::ToolFormat::kDeepSeek)) {
++    return fail("tool format is invalid");
++  }
++  const auto format =
++      static_cast<sampling::JsonConstraint::ToolFormat>(recipe.format);
++  std::vector<sampling::JsonConstraint::Tool> tools;
++  tools.reserve(recipe.tools.size());
++  for (const auto& tool : recipe.tools) {
++    std::shared_ptr<const sampling::JsonConstraint> arguments;
++    try {
++      // The native pass carries `required`; the JSON fallback pass does not,
++      // exactly as the admitting rank compiled them.
++      arguments = sampling::JsonConstraint::ToolParameters(
++          json::parse(tool.parameters_json), tool.strict, format,
++          format != sampling::JsonConstraint::ToolFormat::kJson &&
++              recipe.tool_required);
++    } catch (const std::exception& exception) {
++      return fail("tool '" + tool.name +
++                  "' parameters are invalid: " + exception.what());
++    }
++    if (arguments == nullptr) {
++      return fail("tool '" + tool.name +
++                  "' parameters are unavailable in the recipe's format");
++    }
++    tools.emplace_back(tool.name, std::move(arguments));
++  }
++  auto grammar = sampling::JsonConstraint::WithTools(
++      std::move(answer), std::move(tools), recipe.tool_required,
++      recipe.parallel, format);
++  if (recipe.reasoning) {
++    grammar = sampling::JsonConstraint::WithReasoning(grammar);
++  }
++  return bind(std::move(grammar));
++}
++
+ }  // namespace gufo::server
+diff --git a/src/cli/serve/text_model_runner.hpp b/src/cli/serve/text_model_runner.hpp
+index de2fae3..8527b46 100644
+--- a/src/cli/serve/text_model_runner.hpp
++++ b/src/cli/serve/text_model_runner.hpp
+@@ -15,6 +15,7 @@
+ #include <string_view>
+ #include <vector>
+ 
++#include "src/cli/serve/constraint_recipe.hpp"
+ #include "src/cli/serve/continuation_cache.hpp"
+ #include "src/cli/serve/text_generation_backend.hpp"
+ #include "src/core/sampling.hpp"
+@@ -166,6 +167,21 @@ struct TextDecodeSelection {
+   std::string piece;
+ };
+ 
++/// Why a decode step produced tokens the way it did.
++enum class TextDecodeMode : std::uint8_t {
++  /// A multi-token speculative cycle ran.
++  kSpeculative,
++  /// A sampling constraint kept the request to single-token steps: over
++  /// TP2 the peer cannot reproduce constraint-aware verification.
++  kArConstraint,
++  /// The step's remaining token budget was a single token.
++  kArBudget,
++  /// The runner cannot speculate.
++  kArUnavailable,
++  /// The draft policy chose zero proposals for this cycle.
++  kArPolicy,
++};
++
+ struct TextDecodeStep {
+   std::vector<TextDecodeSelection> selections;
+   /// Number of speculative verification rounds actually executed.
+@@ -173,6 +189,8 @@ struct TextDecodeStep {
+   std::size_t draft_tokens{0};
+   std::size_t draft_accepted_tokens{0};
+   bool stop{false};
++  /// How this step decoded; the scheduler accounts it per request.
++  TextDecodeMode mode{TextDecodeMode::kArUnavailable};
+   /// Execution actually used for this request, including model-owned subgroup
+   /// dispatch. A runner's advertised maximum is not evidence of batching.
+   TextExecutionPlan execution_plan{};
+@@ -254,6 +272,12 @@ public:
+   BuildConstraintVocabulary() const {
+     throw std::invalid_argument("model does not support structured output");
+   }
++  /// A stable fingerprint of the vocabulary `BuildConstraintVocabulary`
++  /// produces (token pieces and stop bits), so a TP2 pair refuses to pair up
++  /// when their tokenizers disagree. Empty when the runner cannot build one.
++  [[nodiscard]] virtual std::string ConstraintVocabularyFingerprint() const {
++    return {};
++  }
+   [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
+       const {
+     return sampling::JsonConstraint::ToolFormat::kJson;
+@@ -565,6 +589,23 @@ private:
+     sampling::SamplingConfig* sampling,
+     std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
+ 
++/// The effective constraint of a request as a recipe a TP2 peer can rebuild:
++/// `format` is the final tool format after any JSON fallback (from
++/// `ConstrainChatRequest`'s out parameter when tools are present) and
++/// `reasoning` the admitting rank's resolved wrapper decision.
++[[nodiscard]] ConstraintRecipe DescribeConstraint(
++    const ChatRequest& request,
++    const std::optional<sampling::JsonConstraint::ToolFormat>& format,
++    bool reasoning);
++
++/// Rebuilds the constraint a recipe describes, bound to `runner`'s own
++/// vocabulary. Returns null and sets `error` when the recipe cannot be
++/// rebuilt exactly; the caller must fail the request rather than run it
++/// unconstrained.
++[[nodiscard]] std::shared_ptr<const sampling::TokenConstraint>
++BuildConstraintFromRecipe(const ConstraintRecipe& recipe,
++                          const TextModelRunner& runner, std::string* error);
++
+ }  // namespace gufo::server
+ 
+ #endif  // GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
+diff --git a/src/cli/serve/tp_control.cpp b/src/cli/serve/tp_control.cpp
+index 1fa3480..3b4df76 100644
+--- a/src/cli/serve/tp_control.cpp
++++ b/src/cli/serve/tp_control.cpp
+@@ -27,9 +27,11 @@ namespace gufo::server {
+ namespace {
+ 
+ constexpr std::uint32_t kMagic = 0x54504331U;  // "TPC1"
+-constexpr std::uint16_t kVersion = 17;         // requests and rank-1 executor
++constexpr std::uint16_t kVersion = 18;         // requests and rank-1 executor
+                                                // instructions for concurrent
+-                                               // requests
++                                               // requests; 18 adds the
++                                               // constraint recipe and the
++                                               // vocabulary fingerprint
+ constexpr std::uint16_t kHello = 1;
+ constexpr std::uint16_t kCommand = 2;
+ constexpr std::uint16_t kResponse = 3;
+@@ -43,6 +45,9 @@ constexpr std::size_t kMaxBatchMembers = 8;
+ constexpr std::size_t kMaxClientIdBytes = 4096;
+ constexpr std::size_t kMaxErrorBytes = 1U << 20;
+ constexpr std::size_t kMaxAuthTokenBytes = 4096;
++constexpr std::size_t kMaxFingerprintBytes = 4096;
++constexpr std::size_t kMaxConstraintTools = 128;
++constexpr std::size_t kMaxConstraintStringBytes = 1U << 20;
+ constexpr auto kIoTimeout = std::chrono::seconds(30);
+ 
+ void SetError(std::string* error, std::string message) {
+@@ -147,7 +152,49 @@ bool ReadU64(std::span<const std::uint8_t> data, std::size_t* offset,
+          command.cache_prefix_tokens != 0 || !command.prompt_tokens.empty() ||
+          !command.client_id.empty() || !command.prompt_context.empty() ||
+          !IsDefaultSampling(command.sampling) || command.constrained ||
+-         command.sampling.constraint != nullptr || !command.stop_at_eos;
++         command.sampling.constraint != nullptr || !command.stop_at_eos ||
++         command.recipe.present;
++}
++
++/// A recipe is bounded and coherent with the request's constrained flag:
++/// both derive from the same admission, so a disagreement means the two
++/// messages describe different requests.
++[[nodiscard]] bool RecipeIsValid(const ConstraintRecipe& recipe,
++                                 bool constrained, std::string* error) {
++  const auto invalid = [error](const char* message) {
++    SetError(error, message);
++    return false;
++  };
++  if (recipe.present != constrained) {
++    return invalid("TP request constraint recipe disagrees with its flag");
++  }
++  if (!recipe.present) {
++    if (recipe.response_kind != 0 || !recipe.response_schema.empty() ||
++        recipe.response_strict || !recipe.tools.empty() ||
++        recipe.tool_required || recipe.parallel || recipe.reasoning ||
++        recipe.format != 0) {
++      return invalid("TP request carries constraint fields without a recipe");
++    }
++    return true;
++  }
++  if (recipe.response_kind < 0 || recipe.response_kind > 2 ||
++      (recipe.response_kind == 2 ? recipe.response_schema.empty()
++                                 : !recipe.response_schema.empty()) ||
++      recipe.response_schema.size() > kMaxConstraintStringBytes ||
++      recipe.tools.size() > kMaxConstraintTools) {
++    return invalid("TP request constraint recipe is invalid");
++  }
++  for (const auto& tool : recipe.tools) {
++    if (tool.name.empty() || tool.name.size() > kMaxConstraintStringBytes ||
++        tool.parameters_json.empty() ||
++        tool.parameters_json.size() > kMaxConstraintStringBytes) {
++      return invalid("TP request constraint recipe tool is invalid");
++    }
++  }
++  if (recipe.format < 0 || recipe.format > 2) {
++    return invalid("TP request constraint recipe format is invalid");
++  }
++  return true;
+ }
+ 
+ [[nodiscard]] std::uint32_t FloatBits(float value) {
+@@ -322,7 +369,9 @@ bool ValidateTpControlCommand(const TpControlCommand& command,
+                           exception.what());
+       return false;
+     }
+-    return true;
++    return RecipeIsValid(
++        command.recipe,
++        command.constrained || command.sampling.constraint != nullptr, error);
+   }
+   if (command.kind == TpControlCommandKind::kInstruction) {
+     // An instruction is one model call within a request that a previous
+@@ -641,6 +690,10 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
+   AppendU32(&payload, static_cast<std::uint32_t>(config.auth_token.size()));
+   payload.insert(payload.end(), config.auth_token.begin(),
+                  config.auth_token.end());
++  AppendU32(&payload,
++            static_cast<std::uint32_t>(config.vocabulary_fingerprint.size()));
++  payload.insert(payload.end(), config.vocabulary_fingerprint.begin(),
++                 config.vocabulary_fingerprint.end());
+   if (!SendFrame(kHello, 0, payload, error)) {
+     return false;
+   }
+@@ -668,6 +721,7 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
+   std::uint32_t disk_cache = 0;
+   std::uint64_t snapshot_budget = 0;
+   std::uint32_t auth_size = 0;
++  std::uint32_t fingerprint_size = 0;
+   std::string peer_token;
+   if (!ReadU32(peer, &offset, &rank, error) ||
+       !ReadU32(peer, &offset, &world, error) ||
+@@ -680,12 +734,22 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
+       !ReadU32(peer, &offset, &disk_cache, error) ||
+       !ReadU64(peer, &offset, &snapshot_budget, error) ||
+       !ReadU32(peer, &offset, &auth_size, error) ||
+-      auth_size > kMaxAuthTokenBytes || peer.size() - offset != auth_size) {
++      auth_size > kMaxAuthTokenBytes ||
++      peer.size() - offset < std::size_t{auth_size}) {
+     SetError(error, "TP control hello payload is invalid");
+     return false;
+   }
+   peer_token.assign(reinterpret_cast<const char*>(peer.data() + offset),
+                     auth_size);
++  offset += auth_size;
++  if (!ReadU32(peer, &offset, &fingerprint_size, error) ||
++      fingerprint_size > kMaxFingerprintBytes ||
++      peer.size() - offset != fingerprint_size) {
++    SetError(error, "TP control hello payload is invalid");
++    return false;
++  }
++  const std::string peer_fingerprint(
++      reinterpret_cast<const char*>(peer.data() + offset), fingerprint_size);
+   // Name every setting the ranks disagree on: both must be started with the
+   // same model options, and a bare mismatch leaves the operator guessing.
+   std::string mismatch;
+@@ -715,6 +779,16 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
+   if (peer_token != auth_token_) {
+     mismatch += std::string(mismatch.empty() ? "" : ", ") + "control token";
+   }
++  if (config.vocabulary_fingerprint.empty() || peer_fingerprint.empty() ||
++      config.vocabulary_fingerprint != peer_fingerprint) {
++    // Constrained multi-token decode replays each grammar against both
++    // tokenizers; different vocabularies would make the ranks accept
++    // different tokens.
++    mismatch += std::string(mismatch.empty() ? "" : ", ") +
++                "constraint-vocabulary fingerprint " +
++                config.vocabulary_fingerprint + " here, " + peer_fingerprint +
++                " on the peer";
++  }
+   if (!mismatch.empty()) {
+     SetError(error, "TP control hello configuration mismatch: " + mismatch);
+     return false;
+@@ -779,6 +853,30 @@ bool TpControlChannel::SendCommand(const TpControlCommand& command,
+     AppendU32(&payload,
+               (command.constrained || config.constraint != nullptr ? 1U : 0U) |
+                   (command.stop_at_eos ? 0U : 2U));
++    AppendU32(&payload, command.recipe.present ? 1U : 0U);
++    if (command.recipe.present) {
++      const auto& recipe = command.recipe;
++      AppendU32(&payload, static_cast<std::uint32_t>(recipe.response_kind));
++      AppendU32(&payload,
++                static_cast<std::uint32_t>(recipe.response_schema.size()));
++      AppendU32(&payload, recipe.response_strict ? 1U : 0U);
++      AppendU32(&payload, static_cast<std::uint32_t>(recipe.tools.size()));
++      payload.insert(payload.end(), recipe.response_schema.begin(),
++                     recipe.response_schema.end());
++      for (const auto& tool : recipe.tools) {
++        AppendU32(&payload, static_cast<std::uint32_t>(tool.name.size()));
++        payload.insert(payload.end(), tool.name.begin(), tool.name.end());
++        AppendU32(&payload,
++                  static_cast<std::uint32_t>(tool.parameters_json.size()));
++        payload.insert(payload.end(), tool.parameters_json.begin(),
++                       tool.parameters_json.end());
++        AppendU32(&payload, tool.strict ? 1U : 0U);
++      }
++      AppendU32(&payload, recipe.tool_required ? 1U : 0U);
++      AppendU32(&payload, recipe.parallel ? 1U : 0U);
++      AppendU32(&payload, recipe.reasoning ? 1U : 0U);
++      AppendU32(&payload, static_cast<std::uint32_t>(recipe.format));
++    }
+   } else {
+     const auto& instruction = command.instruction;
+     AppendU32(&payload, static_cast<std::uint32_t>(instruction.op));
+@@ -912,6 +1010,85 @@ bool TpControlChannel::ReceiveCommand(TpControlCommand* command,
+     config.repeat_last_n = static_cast<std::size_t>(repeat_last_n);
+     config.frequency_penalty = BitsFloat(frequency_penalty);
+     config.presence_penalty = BitsFloat(presence_penalty);
++    auto& recipe = parsed.recipe;
++    std::uint32_t recipe_present = 0;
++    if (!ReadU32(command_prompt_, &offset, &recipe_present, error) ||
++        recipe_present > 1 ||
++        (recipe_present == 0 && command_prompt_.size() != offset)) {
++      return reject("TP control request constraint recipe header is invalid");
++    }
++    recipe.present = recipe_present != 0;
++    if (recipe.present) {
++      std::uint32_t response_kind = 0;
++      std::uint32_t response_schema_size = 0;
++      std::uint32_t response_strict = 0;
++      std::uint32_t tool_count = 0;
++      if (!ReadU32(command_prompt_, &offset, &response_kind, error) ||
++          !ReadU32(command_prompt_, &offset, &response_schema_size, error) ||
++          !ReadU32(command_prompt_, &offset, &response_strict, error) ||
++          !ReadU32(command_prompt_, &offset, &tool_count, error) ||
++          response_kind > 2 || response_strict > 1 ||
++          response_schema_size > kMaxConstraintStringBytes ||
++          tool_count > kMaxConstraintTools ||
++          command_prompt_.size() - offset < response_schema_size) {
++        return reject("TP control request constraint recipe header is invalid");
++      }
++      recipe.response_kind = static_cast<int>(response_kind);
++      recipe.response_schema.assign(
++          command_prompt_.begin() + static_cast<std::ptrdiff_t>(offset),
++          command_prompt_.begin() +
++              static_cast<std::ptrdiff_t>(offset + response_schema_size));
++      offset += response_schema_size;
++      recipe.response_strict = response_strict != 0;
++      recipe.tools.resize(tool_count);
++      for (auto& tool : recipe.tools) {
++        std::uint32_t name_size = 0;
++        std::uint32_t parameters_size = 0;
++        std::uint32_t strict = 0;
++        if (!ReadU32(command_prompt_, &offset, &name_size, error) ||
++            name_size > kMaxConstraintStringBytes || name_size == 0 ||
++            command_prompt_.size() - offset < name_size) {
++          return reject("TP control request constraint recipe tool is invalid");
++        }
++        tool.name.assign(
++            reinterpret_cast<const char*>(command_prompt_.data() + offset),
++            name_size);
++        offset += name_size;
++        if (!ReadU32(command_prompt_, &offset, &parameters_size, error) ||
++            parameters_size > kMaxConstraintStringBytes ||
++            parameters_size == 0 ||
++            command_prompt_.size() - offset < parameters_size) {
++          return reject("TP control request constraint recipe tool is invalid");
++        }
++        tool.parameters_json.assign(
++            reinterpret_cast<const char*>(command_prompt_.data() + offset),
++            parameters_size);
++        offset += parameters_size;
++        if (!ReadU32(command_prompt_, &offset, &strict, error) || strict > 1) {
++          return reject("TP control request constraint recipe tool is invalid");
++        }
++        tool.strict = strict != 0;
++      }
++      std::uint32_t tool_required = 0;
++      std::uint32_t parallel = 0;
++      std::uint32_t reasoning = 0;
++      std::uint32_t format = 0;
++      if (!ReadU32(command_prompt_, &offset, &tool_required, error) ||
++          !ReadU32(command_prompt_, &offset, &parallel, error) ||
++          !ReadU32(command_prompt_, &offset, &reasoning, error) ||
++          !ReadU32(command_prompt_, &offset, &format, error) ||
++          tool_required > 1 || parallel > 1 || reasoning > 1 || format > 2 ||
++          command_prompt_.size() != offset) {
++        return reject("TP control request constraint recipe flags are invalid");
++      }
++      recipe.tool_required = tool_required != 0;
++      recipe.parallel = parallel != 0;
++      recipe.reasoning = reasoning != 0;
++      recipe.format = static_cast<int>(format);
++    }
++    if (!RecipeIsValid(recipe, parsed.constrained, error)) {
++      return reject("TP control request constraint recipe is incoherent");
++    }
+   } else if (kind ==
+              static_cast<std::uint32_t>(TpControlCommandKind::kInstruction)) {
+     parsed.kind = TpControlCommandKind::kInstruction;
+diff --git a/src/cli/serve/tp_control.hpp b/src/cli/serve/tp_control.hpp
+index 69b4ae3..606d167 100644
+--- a/src/cli/serve/tp_control.hpp
++++ b/src/cli/serve/tp_control.hpp
+@@ -10,6 +10,7 @@
+ #include <string>
+ #include <vector>
+ 
++#include "src/cli/serve/constraint_recipe.hpp"
+ #include "src/core/sampling.hpp"
+ 
+ namespace gufo::server {
+@@ -31,6 +32,10 @@ struct TpControlConfig {
+   bool vision{false};
+   /// Both ranks keep a disk cache (`--cache-disk`), or neither.
+   bool disk_cache{false};
++  /// The runner's constraint-vocabulary fingerprint. Both ranks must report
++  /// the same non-empty value: constrained multi-token decode replays each
++  /// grammar against the peer's tokenizer.
++  std::string vocabulary_fingerprint;
+ };
+ 
+ enum class TpControlCommandKind : std::uint8_t {
+@@ -157,10 +162,13 @@ struct TpControlCommand {
+   /// its own choice only when this is greedy.
+   sampling::SamplingConfig sampling{};
+   /// kSingle only: decoding is constrained (structured output or a tool
+-  /// call). The constraint itself stays on rank 0, which selects every token,
+-  /// so rank 1 neither checks rank 0's greedy choices nor runs multi-token
+-  /// cycles for the request. Set on the wire when `sampling` has a constraint.
++  /// call). The constraint itself is rebuilt on rank 1 from `recipe`, so
++  /// multi-token cycles verify against the same grammar on both ranks; the
++  /// flag still keeps rank 1's independent greedy cross-check off, because
++  /// rank 0's constrained choice need not be the raw argmax.
+   bool constrained{false};
++  /// kSingle only: the effective constraint as a recipe rank 1 rebuilds.
++  ConstraintRecipe recipe{};
+   /// kSingle only: false when the request decodes past EOS (a raw completion
+   /// with `ignore_eos`). Multi-token cycles stop at EOS on both ranks or on
+   /// neither.
+diff --git a/src/cli/serve/tp_executor.cpp b/src/cli/serve/tp_executor.cpp
+index 1e919bc..6c1c137 100644
+--- a/src/cli/serve/tp_executor.cpp
++++ b/src/cli/serve/tp_executor.cpp
+@@ -843,16 +843,17 @@ TextDecodeStep TpMirroredRunner::DecodeStep(
+   const std::lock_guard<std::recursive_mutex> call_lock(call_mutex_);
+   // A multi-token cycle is one instruction. It carries the sampler's draw
+   // state, so rank 1, whose sampler otherwise matches, draws what rank 0 draws
+-  // and makes the same draft and acceptance decisions. A one-token budget runs
++  // and makes the same draft and acceptance decisions. A constrained request
++  // rebuilds its grammar on rank 1 from the request's recipe, so verification
++  // applies the same constraint on both ranks. A one-token budget runs
+   // through the base implementation instead, which selects here, on rank 0
+   // only, and mirrors the `Advance`; forwarding it to the wrapped runner would
+   // let that `Advance` bypass this wrapper.
+-  // A constrained request (structured output, tool calls) also runs one
+-  // token at a time: its constraint stays on rank 0, so rank 1 could not make
+-  // a cycle's draft and acceptance decisions.
+-  if (max_tokens < 2 || !multi_token_decode_ ||
+-      sampler.config().constraint != nullptr) {
+-    return TextModelRunner::DecodeStep(state, max_tokens, sampler);
++  if (max_tokens < 2 || !multi_token_decode_) {
++    auto step = TextModelRunner::DecodeStep(state, max_tokens, sampler);
++    step.mode = !multi_token_decode_ ? TextDecodeMode::kArUnavailable
++                                     : TextDecodeMode::kArBudget;
++    return step;
+   }
+   auto& mirrored = Mirrored(state);
+   const auto count = ToWire(max_tokens, "decode budget");
+@@ -879,12 +880,9 @@ TextDecodeStep TpMirroredRunner::DecodeStep(
+ 
+ std::vector<TextDecodeStep> TpMirroredRunner::DecodeBatch(
+     std::span<const TextRunnerDecode> decodes) const {
+-  if (decodes.size() < 2 || !multi_token_decode_ ||
+-      std::ranges::any_of(decodes, [](const TextRunnerDecode& decode) {
+-        return decode.sampler.get().config().constraint != nullptr;
+-      })) {
+-    // The base batch runs each member's DecodeStep, which takes constrained
+-    // members one token at a time.
++  if (decodes.size() < 2 || !multi_token_decode_) {
++    // The base batch runs each member's DecodeStep; a one-token budget still
++    // takes the single-token route.
+     return TextModelRunner::DecodeBatch(decodes);
+   }
+   const std::lock_guard<std::recursive_mutex> call_lock(call_mutex_);
+@@ -1280,12 +1278,11 @@ void TpMirroredRunner::RestorePersistentSnapshot(
+ /// and to judge them.
+ struct TpExecutor::Request {
+   Request(const TpControlCommand& begin, std::vector<TextRunnerToken> tokens,
+-          std::size_t states)
++          std::size_t states, sampling::SamplingConfig sampling)
+       : prompt(std::move(tokens)),
+-        greedy(begin.sampling.can_use_unmodified_argmax() &&
+-               !begin.constrained),
++        greedy(sampling.can_use_unmodified_argmax() && !begin.constrained),
+         stop_at_eos(begin.stop_at_eos),
+-        sampler(begin.sampling, prompt),
++        sampler(sampling, prompt),
+         own(states) {}
+ 
+   void Note(std::string message) {
+@@ -1303,10 +1300,13 @@ struct TpExecutor::Request {
+   /// what both ranks feed, so without this check a numerical divergence (the
+   /// full-Q8 bug was one) would go unnoticed. The choice is made after each
+   /// call while rank 0 is still selecting, so it costs rank 1 idle time only.
++  /// A constrained request keeps this off: rank 0's constrained choice need
++  /// not be the raw argmax.
+   bool greedy;
+-  /// Built as rank 0's pool builds the request's sampler, and fed the same
+-  /// accepted tokens, so a multi-token decode sees the same history; each
+-  /// `decode` instruction supplies rank 0's draw state.
++  /// Built as rank 0's pool builds the request's sampler — from the same
++  /// configuration plus the constraint rebuilt from the request's recipe —
++  /// and fed the same accepted tokens, so a multi-token decode sees the same
++  /// history; each `decode` instruction supplies rank 0's draw state.
+   sampling::SamplerState sampler;
+   std::vector<std::optional<OwnChoice>> own;
+   TpExecutionDigest digest;
+@@ -1451,8 +1451,24 @@ bool TpExecutor::Open(const TpControlCommand& begin, std::string* error) {
+     }
+     prompt.push_back(static_cast<TextRunnerToken>(token));
+   }
+-  auto request =
+-      std::make_unique<Request>(begin, std::move(prompt), states_.size());
++  sampling::SamplingConfig sampling = begin.sampling;
++  if (begin.recipe.present) {
++    // Rank 1 rebuilds the request's grammar so its multi-token cycles verify
++    // against the same constraint as rank 0's. A recipe that cannot be
++    // rebuilt fails the pair before any model call: executing the request
++    // unconstrained would diverge inside collectives instead of failing.
++    std::string build_error;
++    auto constraint =
++        BuildConstraintFromRecipe(begin.recipe, *runner_, &build_error);
++    if (constraint == nullptr) {
++      SetError(error,
++               "rank 1 cannot rebuild the request constraint: " + build_error);
++      return false;
++    }
++    sampling.constraint = std::move(constraint);
++  }
++  auto request = std::make_unique<Request>(begin, std::move(prompt),
++                                           states_.size(), sampling);
+   if (!begin.prompt_context.empty()) {
+     // A context rank 1 cannot rebuild fails the request, not the pair: its
+     // calls still run, and the digest reports the difference.
 diff --git a/src/models/qwen38_flash_next/CMakeLists.txt b/src/models/qwen38_flash_next/CMakeLists.txt
 index ed3c70f..d75895d 100644
 --- a/src/models/qwen38_flash_next/CMakeLists.txt
@@ -4171,6 +5285,250 @@ index 386bae7..a7360df 100644
      }
      return finished.peer;
    }
+diff --git a/tests/cli/tp_control_test.cpp b/tests/cli/tp_control_test.cpp
+index e3fcf5a..d6e4674 100644
+--- a/tests/cli/tp_control_test.cpp
++++ b/tests/cli/tp_control_test.cpp
+@@ -98,7 +98,8 @@ int main() {
+                         .max_draft_tokens = 7,
+                         .use_mtp = true,
+                         .auth_token = "test-token",
+-                        .prefill_chunk_tokens = 512};
++                        .prefill_chunk_tokens = 512,
++                        .vocabulary_fingerprint = "test-vocabulary"};
+   TpControlConfig rank1 = rank0;
+   rank1.rank = 1;
+   rank1.snapshot_budget_bytes = 4096;
+@@ -199,19 +200,33 @@ int main() {
+             "TP C1 command with invalid sampling is refused");
+     Require(!got.constrained, "TP C1 command is unconstrained by default");
+ 
+-    // Rank 1 must know a request is constrained: rank 0 then picks every
+-    // token itself, so rank 1 neither checks its greedy choice nor decodes
+-    // multi-token cycles.
++    // A constrained request carries its recipe: rank 1 rebuilds the same
++    // grammar from it and runs constrained multi-token cycles.
++    gufo::server::ConstraintRecipe recipe;
++    recipe.present = true;
++    recipe.response_kind = 2;
++    recipe.response_schema = "{\"type\":\"object\",\"properties\":{}}";
++    recipe.response_strict = true;
++    recipe.tools.push_back({"lookup_city",
++                            "{\"type\":\"object\",\"properties\":{\"city\":"
++                            "{\"type\":\"string\"}}}",
++                            true});
++    recipe.tool_required = true;
++    recipe.parallel = false;
++    recipe.reasoning = true;
++    recipe.format = 1;
+     TpControlCommand constrained = command;
+     constrained.sequence = 9;
+     constrained.constrained = true;
++    constrained.recipe = recipe;
+     Require(server->SendCommand(constrained, &server_error), server_error);
+     TpControlCommand got_constrained;
+     Require(client->ReceiveCommand(&got_constrained, &client_error),
+             client_error);
+     Require(got_constrained.constrained &&
+-                got_constrained.sampling.can_use_unmodified_argmax(),
+-            "TP C1 command carries the constraint flag apart from sampling");
++                got_constrained.sampling.can_use_unmodified_argmax() &&
++                got_constrained.recipe == recipe,
++            "TP C1 command carries the constraint flag and recipe");
+     Require(got_constrained.stop_at_eos && got.stop_at_eos,
+             "TP C1 command stops at EOS by default");
+ 
+@@ -219,13 +234,24 @@ int main() {
+     // cycles must not stop there either.
+     TpControlCommand past_eos = command;
+     past_eos.sequence = 10;
+-    past_eos.constrained = true;
++    past_eos.constrained = false;
+     past_eos.stop_at_eos = false;
+     Require(server->SendCommand(past_eos, &server_error), server_error);
+     TpControlCommand got_past_eos;
+     Require(client->ReceiveCommand(&got_past_eos, &client_error), client_error);
+-    Require(!got_past_eos.stop_at_eos && got_past_eos.constrained,
++    Require(!got_past_eos.stop_at_eos && !got_past_eos.constrained,
+             "TP C1 command carries EOS handling beside the constraint flag");
++
++    // The recipe must agree with the constrained flag: both derive from the
++    // same admission, so a disagreement describes two different requests.
++    TpControlCommand mismatched = command;
++    mismatched.sequence = 11;
++    mismatched.constrained = false;
++    mismatched.recipe = recipe;
++    std::string mismatch_why;
++    Require(!server->SendCommand(mismatched, &mismatch_why) &&
++                mismatch_why.find("recipe") != std::string::npos,
++            "TP C1 command refuses a recipe without its flag");
+   }
+ 
+   // An instruction is one model call for rank 1 to execute within the request
+diff --git a/tests/cli/tp_executor_test.cpp b/tests/cli/tp_executor_test.cpp
+index c3cd188..39b150c 100644
+--- a/tests/cli/tp_executor_test.cpp
++++ b/tests/cli/tp_executor_test.cpp
+@@ -268,6 +268,22 @@ public:
+   static std::string Piece(TextRunnerToken token) {
+     return " t" + std::to_string(token) + ";";
+   }
++  [[nodiscard]] std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
++  BuildConstraintVocabulary() const override {
++    // Pieces that can spell one small JSON object, so constrained decoding
++    // has a speakable grammar. They are independent of Piece(), which only
++    // the logs and decode text use.
++    return std::make_shared<const gufo::sampling::ConstraintVocabulary>(
++        kVocab, [](std::uint32_t id) {
++          static constexpr std::string_view kPieces = "\001{\":,}ax";
++          const char piece = id < kPieces.size() ? kPieces[id] : '.';
++          return gufo::sampling::ConstraintVocabulary::Piece{
++              std::string(1, piece), id == kEos};
++        });
++  }
++  [[nodiscard]] std::string ConstraintVocabularyFingerprint() const override {
++    return "toy-vocabulary";
++  }
+   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+     return std::make_unique<ToyState>(this, next_state_++);
+   }
+@@ -444,6 +460,7 @@ private:
+         step.stop = true;
+         break;
+       }
++      working.Accept(token);
+       toy.tokens.push_back(token);
+       step.selections.push_back({.token = token, .piece = Piece(token)});
+       produced += " " + std::to_string(token);
+@@ -456,6 +473,7 @@ private:
+     step.draft_tokens = limit;
+     step.draft_accepted_tokens =
+         step.selections.empty() ? 0 : step.selections.size() - 1;
++    step.mode = gufo::server::TextDecodeMode::kSpeculative;
+     if (options_.extra_draft_once) {
+       options_.extra_draft_once = false;
+       ++step.draft_tokens;
+@@ -535,7 +553,8 @@ public:
+         .max_context = 256,
+         .auth_token = "executor-test",
+         .sessions = static_cast<std::uint32_t>(sessions),
+-        .disk_cache = !disk0.empty()};
++        .disk_cache = !disk0.empty(),
++        .vocabulary_fingerprint = "executor-test-vocabulary"};
+     TpControlConfig rank1 = rank0;
+     rank1.rank = 1;
+     rank1.disk_cache = !disk1.empty();
+@@ -604,10 +623,12 @@ public:
+       TextGenerationScheduler::CancellationCheck is_cancelled = {},
+       bool reuse = false, std::size_t prefix = 0,
+       const std::function<void()>& submitted = {},
+-      std::shared_ptr<const gufo::server::TextPromptContext> images = {}) {
++      std::shared_ptr<const gufo::server::TextPromptContext> images = {},
++      gufo::server::ConstraintRecipe recipe = {}) {
+     return Close(RunOpen(std::move(prompt), max_tokens, std::move(sampling),
+                          std::move(stop_sequences), std::move(is_cancelled),
+-                         reuse, prefix, submitted, std::move(images)));
++                         reuse, prefix, submitted, std::move(images),
++                         std::move(recipe)));
+   }
+ 
+   /// Runs a request on rank 0 without ending it, as when the next request
+@@ -619,12 +640,20 @@ public:
+       TextGenerationScheduler::CancellationCheck is_cancelled = {},
+       bool reuse = false, std::size_t prefix = 0,
+       const std::function<void()>& submitted = {},
+-      std::shared_ptr<const gufo::server::TextPromptContext> images = {}) {
++      std::shared_ptr<const gufo::server::TextPromptContext> images = {},
++      gufo::server::ConstraintRecipe recipe = {}) {
+     const auto sequence = next_sequence_.fetch_add(1);
+     TpControlCommand begin{.sequence = sequence,
+                            .max_tokens = static_cast<std::uint32_t>(max_tokens),
+                            .client_id = "executor-test",
+                            .sampling = sampling};
++    if (recipe.present) {
++      begin.constrained = true;
++      begin.recipe = std::move(recipe);
++    } else {
++      Require(sampling.constraint == nullptr,
++              "a constrained request carries its recipe");
++    }
+     if (images != nullptr) {
+       begin.prompt_context = mirrored_->EncodePromptContext(*images);
+     }
+@@ -684,6 +713,14 @@ public:
+             "idle reset: " + error);
+   }
+ 
++  /// Binds a grammar to the mirrored runner's toy vocabulary, as the pool
++  /// does for a constrained request on rank 0.
++  [[nodiscard]] std::shared_ptr<const gufo::sampling::TokenConstraint>
++  BindConstraint(
++      std::shared_ptr<const gufo::sampling::JsonConstraint> grammar) const {
++    return mirrored_->BindConstraint(std::move(grammar));
++  }
++
+   void RequireSameCalls(const std::string& what) const {
+     const auto rank0 = inner0_->Log();
+     const auto rank1 = runner1_->Log();
+@@ -1256,6 +1293,41 @@ int main() {
+             error);
+   }
+ 
++  // A constrained request decodes in multi-token cycles over TP2: rank 1
++  // rebuilds the grammar from the recipe, so both ranks verify against it.
++  // The grammar admits exactly the object {"x":"a"}: token ids 1..7 map to
++  // the pieces { " x : , } a, so the constrained output is forced.
++  {
++    Pair pair(ToyOptions{.mtp = true}, ToyOptions{.mtp = true});
++    const auto schema = gufo::json::parse(
++        R"({"type":"object","properties":{"x":{"type":"string",)"
++        R"("enum":["a"]}},"additionalProperties":false,)"
++        R"("required":["x"]})");
++    gufo::sampling::SamplingConfig config;
++    config.constraint = pair.BindConstraint(
++        gufo::sampling::JsonConstraint::Compile(schema, true));
++    gufo::server::ConstraintRecipe recipe;
++    recipe.present = true;
++    recipe.response_kind = 2;
++    recipe.response_schema = schema.dump();
++    recipe.response_strict = true;
++    const std::vector<TextRunnerToken> constrained_prompt{30, 31, 32};
++    const auto constrained = pair.Run(constrained_prompt, 12, config, {}, {},
++                                      false, 0, {}, {}, recipe);
++    Require(constrained.worker_error.empty(),
++            "constrained: " + constrained.worker_error);
++    const std::vector<TextRunnerToken> expected{1, 2, 7, 2, 3, 2, 6, 2, 5};
++    Require(constrained.result.tokens == expected,
++            "constrained output spells the grammar's only object");
++    Require(constrained.result.finish_reason == FinishReason::kStop,
++            "the completed object stops the request");
++    Require(constrained.result.decode_steps_speculative > 0,
++            "constrained request decodes in multi-token cycles");
++    Require(constrained.result.decode_steps_ar_constraint == 0,
++            "the constraint no longer forces single-token decoding");
++    pair.RequireSameCalls("constrained");
++  }
++
+   // AR: greedy, sampled, stopped and cancelled requests on one pair.
+   {
+     Pair pair({}, {});
+diff --git a/tests/functional/tp2_constraints.py b/tests/functional/tp2_constraints.py
+index 3e24210..53e7cf6 100644
+--- a/tests/functional/tp2_constraints.py
++++ b/tests/functional/tp2_constraints.py
+@@ -111,7 +111,11 @@ def ask(name, body):
+         else:
+             assert message['content'] and not message.get('tool_calls'), record
+         if body.get('tools') or body.get('response_format'):
+-            assert usage['draft_tokens'] == 0, record
++            # Rank 1 rebuilds the constraint from the request's recipe, so
++            # constrained multi-token cycles verify against the grammar on
++            # both ranks and tool/schema requests draft like plain ones.
++            assert (args.speculative != 'mtp' or
++                    usage['draft_tokens'] > 0), record
+         elif args.speculative == 'mtp':
+             assert usage['draft_tokens'] > 0, record
+         if args.speculative == 'off':
 diff --git a/tests/models/qwen38_flash_next/CMakeLists.txt b/tests/models/qwen38_flash_next/CMakeLists.txt
 index 6ee40b2..9d8edd9 100644
 --- a/tests/models/qwen38_flash_next/CMakeLists.txt
