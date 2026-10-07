@@ -144,6 +144,22 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~09:35 AUDIT FOLLOW-UPS PINNED (test-only, no behavior change,
+  no deploy — deployed binary stays 42fc94e6): (A) the TP2 toy pair now
+  covers a REAL grammar-mask rejection: reject_at injects an inadmissible
+  raw peak at the cycle's first draw and again after an accepted token
+  (absolute positions 3 and 10 over the prompt), greedy AND
+  random-sampling (temp/seed/penalty, deferred draw-state residual) — both
+  ranks independently mask and must land on the same token
+  (RequireSameCalls pins digest lockstep; output stays the constrained
+  object; spec cycles retained, no AR fallback). (B) the thinking markers
+  are single-sourced in quote_tracker.hpp: inference_backend's buffered
+  reasoning_tokens search tokenizes kThinkEnd instead of a re-typed
+  literal, the new inline ReasoningTokenCount carries the split /
+  never-closed / zero semantics with unit tests (marker absent at-start
+  mid first-of-many multi-piece empty). Gates: hosted CPU contract suite
+  PASS; 9 focused tests green; format clean. gufo 658e269 + d3e7ab8.
+  Model-layer DeepSeek marker duplicates stay (model-local by design).
 - 2026-10-07 ~08:50 UPSTREAM TOOL CORRECTNESS INTEGRATED (user-approved
   plan, both fixes): (1) upstream #441 native-tool parity — native syntax
   kept for every schema, request-wide JSON fallback removed (both TP2

@@ -507,7 +507,7 @@ index 06d290c..a943dc4 100644
                                           "' is not supported on this endpoint");
      }
 diff --git a/src/cli/serve/inference_backend.cpp b/src/cli/serve/inference_backend.cpp
-index 78898e1..62a17b6 100644
+index 78898e1..3233258 100644
 --- a/src/cli/serve/inference_backend.cpp
 +++ b/src/cli/serve/inference_backend.cpp
 @@ -2643,6 +2643,32 @@ public:
@@ -575,7 +575,32 @@ index 78898e1..62a17b6 100644
      }
      return steps;
    }
-@@ -3272,7 +3307,8 @@ struct InferenceBackend::Impl {
+@@ -3189,7 +3224,7 @@ struct InferenceBackend::Impl {
+           tool_format_(tool_format),
+           tp_(std::move(tp)) {
+       if (initial == InitialOutputState::kReasoning)
+-        reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
++        reasoning_end_ = state_->scheduler->runner().Tokenize(kThinkEnd);
+     }
+ 
+     ~ScheduledGenerationRequest() override {
+@@ -3226,13 +3261,8 @@ struct InferenceBackend::Impl {
+       if (local_error != nullptr) {
+         std::rethrow_exception(local_error);
+       }
+-      if (!reasoning_end_.empty()) {
+-        const auto end =
+-            std::search(result.tokens.begin(), result.tokens.end(),
+-                        reasoning_end_.begin(), reasoning_end_.end());
+-        result.reasoning_tokens =
+-            static_cast<std::size_t>(end - result.tokens.begin());
+-      }
++      result.reasoning_tokens =
++          ReasoningTokenCount(result.tokens, reasoning_end_);
+       return result;
+     }
+ 
+@@ -3272,7 +3302,8 @@ struct InferenceBackend::Impl {
        bool cache_prompt, std::size_t cache_prefix_tokens,
        std::shared_ptr<const TextPromptContext> context, bool return_progress,
        std::optional<sampling::JsonConstraint::ToolFormat> tool_format,
@@ -585,7 +610,7 @@ index 78898e1..62a17b6 100644
      if (state->tp_runner == nullptr || state->response_broker == nullptr ||
          state->communicator == nullptr || state->scheduler == nullptr) {
        throw std::logic_error("TP2 rank 0 is not fully configured");
-@@ -3308,6 +3344,7 @@ struct InferenceBackend::Impl {
+@@ -3308,6 +3339,7 @@ struct InferenceBackend::Impl {
          .cache_prefix_tokens = static_cast<std::uint32_t>(cache_prefix_tokens),
          .client_id = client_id,
          .sampling = sampling,
@@ -593,7 +618,7 @@ index 78898e1..62a17b6 100644
          .stop_at_eos = stop_at_eos,
      };
      if (context != nullptr) {
-@@ -3346,6 +3383,16 @@ struct InferenceBackend::Impl {
+@@ -3346,6 +3378,16 @@ struct InferenceBackend::Impl {
        tp_open->fetch_sub(1);
        throw std::runtime_error("TP worker command failed: " + error);
      }
@@ -610,7 +635,7 @@ index 78898e1..62a17b6 100644
      state->tp_runner->BeginRequest(begin.sequence);
      auto tp = std::make_unique<TpRequest>(state, tp_open, begin.sequence);
      try {
-@@ -3362,6 +3409,7 @@ struct InferenceBackend::Impl {
+@@ -3362,6 +3404,7 @@ struct InferenceBackend::Impl {
                .stop_at_eos = stop_at_eos,
                .stop_sequences = std::move(stop_sequences),
                .return_progress = return_progress,
@@ -618,7 +643,7 @@ index 78898e1..62a17b6 100644
            });
        return std::make_shared<ScheduledGenerationRequest>(
            state, std::move(scheduled), initial, tool_format, std::move(tp));
-@@ -3383,7 +3431,8 @@ struct InferenceBackend::Impl {
+@@ -3383,7 +3426,8 @@ struct InferenceBackend::Impl {
        std::shared_ptr<const TextPromptContext> context = {},
        bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
        const std::vector<std::string>& stop_sequences = {},
@@ -628,7 +653,7 @@ index 78898e1..62a17b6 100644
      Result result;
      result.prompt_tokens = prompt_tokens.size();
      result.client_id = client_id.empty() ? "anonymous" : client_id;
-@@ -3400,7 +3449,7 @@ struct InferenceBackend::Impl {
+@@ -3400,7 +3444,7 @@ struct InferenceBackend::Impl {
            current, std::move(prompt_tokens), max_tokens, sampling, is_cancelled,
            static_cast<bool>(on_token), client_id, stop_sequences, initial,
            request_start, cache_prompt, cache_prefix_tokens, std::move(context),
@@ -637,7 +662,7 @@ index 78898e1..62a17b6 100644
        return generation->Wait(on_token, {}, {});
      }
  
-@@ -3415,6 +3464,7 @@ struct InferenceBackend::Impl {
+@@ -3415,6 +3459,7 @@ struct InferenceBackend::Impl {
              .cache_prompt = cache_prompt,
              .cache_prefix_tokens = cache_prefix_tokens,
              .stop_sequences = stop_sequences,
@@ -645,7 +670,7 @@ index 78898e1..62a17b6 100644
          });
      ScheduledGenerationRequest generation(std::move(current),
                                            std::move(request), initial);
-@@ -3981,6 +4031,8 @@ bool InferenceBackend::load(
+@@ -3981,6 +4026,8 @@ bool InferenceBackend::load(
            .sessions = static_cast<std::uint32_t>(session_count),
            .vision = has_vision,
            .disk_cache = DiskCacheEnabled(disk_cache_config),
@@ -654,7 +679,7 @@ index 78898e1..62a17b6 100644
        };
        std::string control_error;
        if (!tp_config.control->Handshake(control_config, &control_error)) {
-@@ -4296,19 +4348,24 @@ InferenceBackend::Result InferenceBackend::chat(
+@@ -4296,19 +4343,24 @@ InferenceBackend::Result InferenceBackend::chat(
      return {};
    }
    auto effective_sampling = sampling_config;
@@ -683,7 +708,7 @@ index 78898e1..62a17b6 100644
  #else
    (void)request;
    (void)max_tokens;
-@@ -4343,7 +4400,7 @@ InferenceBackend::start_complete(
+@@ -4343,7 +4395,7 @@ InferenceBackend::start_complete(
          is_cancelled, stream_output,
          client_id.empty() ? "anonymous" : std::string(client_id),
          stop_sequences, InitialOutputState::kContent, request_start, true, 0,
@@ -692,7 +717,7 @@ index 78898e1..62a17b6 100644
    }
    auto scheduled_request = state->scheduler->Submit(
        std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
-@@ -4383,8 +4440,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4383,8 +4435,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
  
    auto effective_sampling = sampling_config;
    std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
@@ -705,7 +730,7 @@ index 78898e1..62a17b6 100644
    const auto& effective_request = constrained ? *constrained : request;
    auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
    if (!prompt.has_value() || prompt->tokens.empty()) {
-@@ -4394,13 +4453,15 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4394,13 +4448,15 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
  
    const std::string client_id =
        request.client_id.empty() ? "anonymous" : request.client_id;
@@ -724,7 +749,7 @@ index 78898e1..62a17b6 100644
    }
    auto scheduled_request = state->scheduler->Submit(
        std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
-@@ -4414,6 +4475,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4414,6 +4470,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
            .cache_prefix_tokens = prompt->cache_prefix_tokens,
            .stop_sequences = request.stop_sequences,
            .return_progress = request.return_progress,
@@ -733,7 +758,7 @@ index 78898e1..62a17b6 100644
    return std::make_shared<Impl::ScheduledGenerationRequest>(
        state, std::move(scheduled_request),
 diff --git a/src/cli/serve/openai_chat.cpp b/src/cli/serve/openai_chat.cpp
-index 3bbc0b4..44b5ce2 100644
+index 3bbc0b4..d707a18 100644
 --- a/src/cli/serve/openai_chat.cpp
 +++ b/src/cli/serve/openai_chat.cpp
 @@ -105,6 +105,21 @@ ToolMarkerSet ToolMarkers(
@@ -1034,7 +1059,21 @@ index 3bbc0b4..44b5ce2 100644
    }
    const auto content = tool_only ? raw : Trim(raw);
    quotes.Reset(content);
-@@ -2173,9 +2300,13 @@ public:
+@@ -2147,7 +2274,6 @@ public:
+       return StructuredContent();
+ 
+     if (state_ == State::kInitial) {
+-      constexpr std::string_view kThinkStart = "<think>";
+       std::string_view view = pending_;
+       while (!view.empty() &&
+              std::isspace(static_cast<unsigned char>(view.front())) != 0) {
+@@ -2167,15 +2293,18 @@ public:
+     }
+ 
+     if (state_ == State::kThinking) {
+-      constexpr std::string_view kThinkEnd = "</think>";
+       const auto offset = pending_offset();
+       const auto think_found = raw_.find(kThinkEnd, offset);
        const std::size_t end_pos = think_found == std::string::npos
                                        ? std::string::npos
                                        : think_found - offset;
@@ -1051,7 +1090,7 @@ index 3bbc0b4..44b5ce2 100644
        const std::size_t marker =
            found == std::string::npos ? std::string::npos : found - offset;
        if (marker < end_pos) {
-@@ -2197,10 +2328,10 @@ public:
+@@ -2197,10 +2326,10 @@ public:
          quotes_.Reset(raw_, offset + end_pos + kThinkEnd.size());
          trim_reasoning_separator_ = true;
        } else {
@@ -1066,7 +1105,7 @@ index 3bbc0b4..44b5ce2 100644
          held = std::min(held, pending_.size());
          for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
               len > 0; --len) {
-@@ -2412,7 +2543,7 @@ class ResponsesOutput {
+@@ -2412,7 +2541,7 @@ class ResponsesOutput {
  public:
    ResponsesOutput(std::string model, HttpResponse::BodyWriter writer,
                    const ChatRequest& chat)
@@ -1075,7 +1114,7 @@ index 3bbc0b4..44b5ce2 100644
      response_ = json::Value::object();
      response_["id"] = RandomId("resp_");
      response_["object"] = "response";
-@@ -2500,6 +2631,8 @@ public:
+@@ -2500,6 +2629,8 @@ public:
      item["type"] = "function_call";
      item["call_id"] = call.id;
      item["name"] = call.name;
@@ -1084,7 +1123,7 @@ index 3bbc0b4..44b5ce2 100644
      item["arguments"] = "";
      item["status"] = "in_progress";
      auto added = IndexedEvent("response.output_item.added");
-@@ -2630,6 +2763,7 @@ private:
+@@ -2630,6 +2761,7 @@ private:
    }
  
    HttpResponse::BodyWriter writer_;
@@ -1092,7 +1131,7 @@ index 3bbc0b4..44b5ce2 100644
    json::Value response_;
    json::Value item_;
    std::string text_;
-@@ -2965,8 +3099,23 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
+@@ -2965,8 +3097,23 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                          ChatRequest* chat) {
    ParsedChatRequest parsed;
    parsed.chat = *chat;
@@ -1117,7 +1156,7 @@ index 3bbc0b4..44b5ce2 100644
    // Responses attempts strict normalization when strict is omitted; Chat
    // Completions keeps its best-effort default. Explicit true/false wins.
    for (auto& tool : parsed.chat.tools) {
-@@ -3009,6 +3158,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
+@@ -3009,6 +3156,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
        return Error(400, "Bad Request", "'reasoning' must be an object",
                     "invalid_reasoning");
      for (const auto& [key, value] : reasoning->members()) {
@@ -1126,7 +1165,7 @@ index 3bbc0b4..44b5ce2 100644
        if (key != "effort")
          return Error(400, "Bad Request", "unsupported reasoning member: " + key,
                       "invalid_reasoning");
-@@ -3033,13 +3184,20 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
+@@ -3033,13 +3182,20 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
        return Error(400, "Bad Request", "'text' must be an object",
                     "invalid_response_format");
      for (const auto& [key, value] : text->members()) {
@@ -1453,18 +1492,54 @@ index e21cbbc..f1ca183 100644
        }
      });
 diff --git a/src/cli/serve/text_generation_backend.hpp b/src/cli/serve/text_generation_backend.hpp
-index 124075e..9d1a13f 100644
+index 124075e..ee6f1c2 100644
 --- a/src/cli/serve/text_generation_backend.hpp
 +++ b/src/cli/serve/text_generation_backend.hpp
-@@ -5,6 +5,7 @@
+@@ -1,18 +1,22 @@
+ #ifndef GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
+ #define GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
+ 
++#include <algorithm>
+ #include <atomic>
  #include <cstddef>
  #include <cstdint>
  #include <functional>
 +#include <map>
  #include <memory>
  #include <optional>
++#include <span>
  #include <stdexcept>
-@@ -106,6 +107,8 @@ struct ChatRequest {
+ #include <string>
+ #include <string_view>
+ #include <utility>
+ #include <vector>
+ 
++#include "src/cli/serve/quote_tracker.hpp"
+ #include "src/core/reasoning.hpp"
+ #include "src/core/sampling.hpp"
+ #include "src/core/text_sampling_defaults.hpp"
+@@ -21,6 +25,20 @@
+ 
+ namespace gufo::server {
+ 
++/// Counts the tokens of an open reasoning span: everything before the first
++/// occurrence of the end-of-reasoning marker, or the whole sequence when the
++/// marker never arrives and the span was never closed.
++inline std::size_t ReasoningTokenCount(
++    std::span<const tokenization::TokenId> tokens,
++    std::span<const tokenization::TokenId> end_marker) {
++  if (end_marker.empty()) {
++    return 0;
++  }
++  const auto end = std::search(tokens.begin(), tokens.end(), end_marker.begin(),
++                               end_marker.end());
++  return static_cast<std::size_t>(end - tokens.begin());
++}
++
+ enum class TextGenerationErrorCode : std::uint8_t {
+   kQueueFull,
+   kClientQueueFull,
+@@ -106,6 +124,8 @@ struct ChatRequest {
    std::string client_id{"anonymous"};
    ToolChoice tool_choice{ToolChoice::kAuto};
    std::string forced_tool_name;
@@ -1473,7 +1548,7 @@ index 124075e..9d1a13f 100644
    bool constrained_tools{false};
    bool parallel_tool_calls{true};
    ReasoningOptions reasoning;
-@@ -117,6 +120,13 @@ struct ChatRequest {
+@@ -117,6 +137,13 @@ struct ChatRequest {
    bool return_progress{false};
    std::vector<std::string> stop_sequences;
    std::shared_ptr<const sampling::JsonConstraint> response_format;
@@ -1487,7 +1562,7 @@ index 124075e..9d1a13f 100644
    std::string response_format_description;
  };
  
-@@ -202,6 +212,14 @@ public:
+@@ -202,6 +229,14 @@ public:
      std::size_t draft_rounds{0};
      std::size_t draft_tokens{0};
      std::size_t draft_accepted_tokens{0};
@@ -1502,7 +1577,7 @@ index 124075e..9d1a13f 100644
      std::size_t prefill_tokens{0};
      std::size_t prefill_chunks{0};
      std::size_t active_decode_prefill_chunks{0};
-@@ -214,6 +232,12 @@ public:
+@@ -214,6 +249,12 @@ public:
      std::size_t requested_logical_concurrency{1};
      std::size_t physical_execution_width{1};
      std::size_t max_buffered_output_bytes{0};
@@ -7096,7 +7171,7 @@ index cdf4159..95f225c 100644
        server.Post("/v1/messages",
                    R"({"system":[{"type":"text","text":"Be concise."}],
 diff --git a/tests/cli/openai_chat_test.cpp b/tests/cli/openai_chat_test.cpp
-index 3e13452..904e3bd 100644
+index 3e13452..66e7e02 100644
 --- a/tests/cli/openai_chat_test.cpp
 +++ b/tests/cli/openai_chat_test.cpp
 @@ -5,6 +5,7 @@
@@ -7766,7 +7841,37 @@ index 3e13452..904e3bd 100644
               "wildcard JSON types survive transport");
      }
    }
-@@ -4328,6 +4854,7 @@ int main() {
+@@ -4323,11 +4849,37 @@ void TestBracketDenseContent() {
+   }
+ }
+ 
++void TestReasoningTokenCounting() {
++  using gufo::server::ReasoningTokenCount;
++  using gufo::tokenization::TokenId;
++  const TokenId think{7};
++  const TokenId close{9};
++  const std::vector closed{think, think, close, think, close};
++  Expect(ReasoningTokenCount(closed, {&close, 1}) == 2,
++         "reasoning tokens end before the closing marker");
++  const std::vector open{think, close};
++  Expect(ReasoningTokenCount(open, {&close, 1}) == 1,
++         "an unclosed span counts its whole completion");
++  const std::vector marker{think, close, close};
++  const std::vector split{think, close, think, close, close, think, close};
++  Expect(ReasoningTokenCount(split, marker) == 2,
++         "a multi-piece marker ends at its first occurrence");
++  Expect(ReasoningTokenCount(split, std::span<const TokenId>{}) == 0,
++         "a request without a marker reports no reasoning span");
++  const std::vector<TokenId> none{};
++  Expect(ReasoningTokenCount(none, std::span<const TokenId>{&close, 1}) == 0,
++         "an empty completion reports no reasoning tokens");
++  Expect(ReasoningTokenCount(none, {}) == 0,
++         "an empty completion without a marker reports none");
++}
++
+ int main() {
++  TestReasoningTokenCounting();
+   TestHistoricalTypedArgumentsUseTojson();
    TestStreamingPromptProgress();
    TestResponsesPromptProgress();
    TestToolMarkersInsideConstrainedReasoning();
@@ -7774,7 +7879,7 @@ index 3e13452..904e3bd 100644
    TestToolMarkersWhenToolsDisabled();
    TestBracketDenseContent();
    TestStopSequencesAndDefaultFields();
-@@ -4344,6 +4871,7 @@ int main() {
+@@ -4344,6 +4896,7 @@ int main() {
    TestNativeReferencedArgumentTypes();
    TestWildcardToolTypes();
    TestNativeUnionToolTypes();
@@ -7782,7 +7887,7 @@ index 3e13452..904e3bd 100644
    TestToolMetadataAndFraming();
    TestResponsesLiveAndCancellation();
    TestCachePromptOption();
-@@ -4369,6 +4897,7 @@ int main() {
+@@ -4369,6 +4922,7 @@ int main() {
    TestToolCallsAreStructured();
    TestToolParameterCompatibility();
    TestInvalidToolsFailBeforeGeneration();
@@ -8076,10 +8181,21 @@ index e3fcf5a..3d17835 100644
    // because the wire is the path a peer exercises.
    const auto refuses = [&](const std::string& what,
 diff --git a/tests/cli/tp_executor_test.cpp b/tests/cli/tp_executor_test.cpp
-index c3cd188..6ce72d4 100644
+index c3cd188..a07c54c 100644
 --- a/tests/cli/tp_executor_test.cpp
 +++ b/tests/cli/tp_executor_test.cpp
-@@ -268,6 +268,22 @@ public:
+@@ -119,6 +119,10 @@ struct ToyOptions {
+   bool extra_draft_once{false};
+   /// Rank-1 fault: refuse to rebuild a request's prompt context.
+   bool fail_context_decode{false};
++  /// Absolute sequence lengths whose raw peak lands outside the grammar's
++  /// language, so under a constraint the mask must override the proposal —
++  /// like a real proposer emitting an inadmissible token.
++  std::vector<std::pair<std::size_t, TextRunnerToken>> reject_at;
+ };
+ 
+ /// A toy "image": it shifts every logit of the sequence that sees it, and its
+@@ -268,6 +272,22 @@ public:
    static std::string Piece(TextRunnerToken token) {
      return " t" + std::to_string(token) + ";";
    }
@@ -8102,7 +8218,7 @@ index c3cd188..6ce72d4 100644
    [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
      return std::make_unique<ToyState>(this, next_state_++);
    }
-@@ -444,6 +460,7 @@ private:
+@@ -444,6 +464,7 @@ private:
          step.stop = true;
          break;
        }
@@ -8110,7 +8226,7 @@ index c3cd188..6ce72d4 100644
        toy.tokens.push_back(token);
        step.selections.push_back({.token = token, .piece = Piece(token)});
        produced += " " + std::to_string(token);
-@@ -456,6 +473,7 @@ private:
+@@ -456,6 +477,7 @@ private:
      step.draft_tokens = limit;
      step.draft_accepted_tokens =
          step.selections.empty() ? 0 : step.selections.size() - 1;
@@ -8118,7 +8234,22 @@ index c3cd188..6ce72d4 100644
      if (options_.extra_draft_once) {
        options_.extra_draft_once = false;
        ++step.draft_tokens;
-@@ -535,7 +553,9 @@ public:
+@@ -482,6 +504,14 @@ private:
+       options_.diverge_at.reset();
+       peak = peak % (kVocab - 1) + 1;
+     }
++    for (auto& [position, token] : options_.reject_at) {
++      if (position == tokens.size()) {
++        // One-shot: consuming the entry keeps later requests unconstrained.
++        options_.reject_at.erase(options_.reject_at.begin());
++        peak = token;
++        break;
++      }
++    }
+     std::vector<float> logits(kVocab);
+     for (std::size_t i = 0; i < kVocab; ++i) {
+       logits[i] = -0.25F * static_cast<float>(i > peak ? i - peak : peak - i);
+@@ -535,7 +565,9 @@ public:
          .max_context = 256,
          .auth_token = "executor-test",
          .sessions = static_cast<std::uint32_t>(sessions),
@@ -8129,7 +8260,7 @@ index c3cd188..6ce72d4 100644
      TpControlConfig rank1 = rank0;
      rank1.rank = 1;
      rank1.disk_cache = !disk1.empty();
-@@ -593,6 +613,8 @@ public:
+@@ -593,6 +625,8 @@ public:
    struct Open {
      std::uint64_t sequence{0};
      Outcome outcome;
@@ -8138,7 +8269,7 @@ index c3cd188..6ce72d4 100644
    };
  
    /// Runs one request as serving does. `submitted` runs once the scheduler
-@@ -604,10 +626,12 @@ public:
+@@ -604,10 +638,12 @@ public:
        TextGenerationScheduler::CancellationCheck is_cancelled = {},
        bool reuse = false, std::size_t prefix = 0,
        const std::function<void()>& submitted = {},
@@ -8153,7 +8284,7 @@ index c3cd188..6ce72d4 100644
    }
  
    /// Runs a request on rank 0 without ending it, as when the next request
-@@ -619,12 +643,20 @@ public:
+@@ -619,12 +655,20 @@ public:
        TextGenerationScheduler::CancellationCheck is_cancelled = {},
        bool reuse = false, std::size_t prefix = 0,
        const std::function<void()>& submitted = {},
@@ -8175,7 +8306,7 @@ index c3cd188..6ce72d4 100644
      if (images != nullptr) {
        begin.prompt_context = mirrored_->EncodePromptContext(*images);
      }
-@@ -635,6 +667,15 @@ public:
+@@ -635,6 +679,15 @@ public:
      Require(broker_->RegisterPendingResponse(sequence, &error),
              "register: " + error);
      Require(server_->SendCommand(begin, &error), "begin: " + error);
@@ -8191,7 +8322,7 @@ index c3cd188..6ce72d4 100644
      mirrored_->BeginRequest(sequence);
      TextRequestMetadata metadata;
      metadata.prompt_context =
-@@ -660,6 +701,11 @@ public:
+@@ -660,6 +713,11 @@ public:
    Outcome Close(Open open) {
      const auto sequence = open.sequence;
      Outcome outcome = std::move(open.outcome);
@@ -8203,7 +8334,7 @@ index c3cd188..6ce72d4 100644
      const std::string local_error = std::move(outcome.worker_error);
      std::string error;
      Require(mirrored_->EndRequest(sequence, &error), "end: " + error);
-@@ -684,6 +730,14 @@ public:
+@@ -684,6 +742,14 @@ public:
              "idle reset: " + error);
    }
  
@@ -8218,7 +8349,7 @@ index c3cd188..6ce72d4 100644
    void RequireSameCalls(const std::string& what) const {
      const auto rank0 = inner0_->Log();
      const auto rank1 = runner1_->Log();
-@@ -1256,6 +1310,63 @@ int main() {
+@@ -1256,6 +1322,127 @@ int main() {
              error);
    }
  
@@ -8277,6 +8408,70 @@ index c3cd188..6ce72d4 100644
 +    Require(after.worker_error.empty() && after.result.tokens == expected,
 +            "the pair serves the next request after a rejection");
 +    pair.RequireSameCalls("after rejection");
++  }
++
++  // A grammar mask overrides an inadmissible proposal mid-draft: rank 0's
++  // raw peak leaves the grammar's language at the cycle's first draw and
++  // again after an accepted token, so both ranks must reach the same token
++  // through their own masks and stay in lockstep.
++  {
++    ToyOptions rank0{.mtp = true};
++    ToyOptions rank1{.mtp = true};
++    rank0.reject_at = {{3, 7}, {10, 5}};
++    rank1.reject_at = rank0.reject_at;
++    Pair pair(rank0, rank1);
++    const auto schema = gufo::json::parse(
++        R"({"type":"object","properties":{"x":{"type":"string",)"
++        R"("enum":["a"]}},"additionalProperties":false,)"
++        R"("required":["x"]})");
++    gufo::sampling::SamplingConfig config;
++    config.constraint = pair.BindConstraint(
++        gufo::sampling::JsonConstraint::Compile(schema, true));
++    gufo::server::ConstraintRecipe recipe;
++    recipe.present = true;
++    recipe.response_kind = 2;
++    recipe.response_schema = schema.dump();
++    recipe.response_strict = true;
++    const std::vector<TextRunnerToken> constrained_prompt{30, 31, 32};
++    const auto rejected_proposal = pair.Run(constrained_prompt, 12, config, {},
++                                            {}, false, 0, {}, {}, recipe);
++    Require(rejected_proposal.worker_error.empty(),
++            "constrained rejection: " + rejected_proposal.worker_error);
++    const std::vector<TextRunnerToken> expected{1, 2, 7, 2, 3, 2, 6, 2, 5};
++    Require(rejected_proposal.result.tokens == expected,
++            "the mask overrides an inadmissible proposal");
++    Require(rejected_proposal.result.finish_reason == FinishReason::kStop,
++            "an overridden proposal still completes the object");
++    Require(rejected_proposal.result.decode_steps_speculative > 0,
++            "rejected proposals decode in multi-token cycles");
++    Require(rejected_proposal.result.decode_steps_ar_constraint == 0,
++            "a rejected proposal does not fall back to single tokens");
++    pair.RequireSameCalls("rejected proposal");
++
++    // The same story under random sampling, where the deferred residual
++    // rides across the overridden draws on both ranks.
++    ToyOptions random_rank0{.mtp = true};
++    ToyOptions random_rank1{.mtp = true};
++    random_rank0.reject_at = {{3, 7}, {10, 5}};
++    random_rank1.reject_at = random_rank0.reject_at;
++    Pair random_pair(random_rank0, random_rank1);
++    gufo::sampling::SamplingConfig sampled_config;
++    sampled_config.temperature = 0.9F;
++    sampled_config.seed = 42;
++    sampled_config.repeat_penalty = 1.3F;
++    sampled_config.constraint = random_pair.BindConstraint(
++        gufo::sampling::JsonConstraint::Compile(schema, true));
++    const auto sampled = random_pair.Run(constrained_prompt, 12, sampled_config,
++                                         {}, {}, false, 0, {}, {}, recipe);
++    Require(sampled.worker_error.empty(),
++            "sampled constrained rejection: " + sampled.worker_error);
++    Require(sampled.result.tokens == expected,
++            "a constrained draw also spells the grammar's only object");
++    Require(sampled.result.finish_reason == FinishReason::kStop &&
++                sampled.result.decode_steps_speculative > 0 &&
++                sampled.result.decode_steps_ar_constraint == 0,
++            "a sampled constrained request keeps its multi-token cycles");
++    random_pair.RequireSameCalls("sampled rejected proposal");
 +  }
 +
    // AR: greedy, sampled, stopped and cancelled requests on one pair.
