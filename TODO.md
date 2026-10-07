@@ -144,6 +144,15 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~09:45 DEPLOY a28a6448 (from d3e7ab8, includes the pinned
+  rejection-lockstep test + token-accounting refactor): binary replaced on
+  BOTH hosts via mv with backup gufo.42fc94e6; systemctl restart
+  gufo-prod; guardian accepted first cycle (canary FAST 1969.6 prefill
+  tps, logs .../20261007-094150); /ready green; smoke tools request r5:
+  finish tool_calls API-level, decode_modes=spec:22/constr:0/policy:1/
+  budget:0/unavail:0, constraint=1 tools=1, 43/67 drafts 64.2%, 54.8
+  tok/s, no AR fallback. User running the next end-to-end LLM run against
+  this deploy; logs in evidence/serve-guardian/20261007-094150/.
 - 2026-10-07 ~09:35 AUDIT FOLLOW-UPS PINNED (test-only, no behavior change,
   no deploy — deployed binary stays 42fc94e6): (A) the TP2 toy pair now
   covers a REAL grammar-mask rejection: reject_at injects an inadmissible
