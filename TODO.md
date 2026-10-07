@@ -144,6 +144,28 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~08:50 UPSTREAM TOOL CORRECTNESS INTEGRATED (user-approved
+  plan, both fixes): (1) upstream #441 native-tool parity — native syntax
+  kept for every schema, request-wide JSON fallback removed (both TP2
+  recipe builders adapted to the new ToolParameters(schema,strict,format)
+  signature; tool_required stays in WithTools), delimiter/overlap and
+  implicit-reasoning-end parser fixes, span-preserving tokenization, warm
+  initial-mask reuse; 688-decision llama.cpp grammar fixture imported.
+  (2) upstream #434 Responses tolerance — hosted tools skipped, namespace
+  functions flattened + echoed, null reasoning replay, Codex request
+  fields tolerated. (3) TP2 corrections from the audit, landed first
+  (3b07878): DescribeConstraint removed — the recipe is now emitted by
+  ConstrainChatRequest from the composing decisions (fixes
+  tools+tool_choice:none+response_format mirroring response-only vs
+  response-or-tool across ranks), and every kSingle is gated on rank 1's
+  sequence-correlated admission verdict (kAdmission response; protocol
+  v19) before rank 0 schedules model work — rebuild/initialization
+  failures reject the request cleanly. Gates: hosted CPU contract suite
+  PASS (sandbox); tp2_constraints.py 9/9 on a fresh 2-session live pair,
+  drafts 15-36 on every constrained request; prod tools request
+  finish=tool_calls, spec-mode decode 53.4 tok/s. gufo 3b07878, 9869526,
+  0a13415, 37004ed; WIP patch regenerated; deployed binary 42fc94e6 BOTH
+  hosts (backup gufo.2d4a43ec); guardian accepted first cycle.
 - 2026-10-07 ~07:35 TP2 CONSTRAINED MTP SHIPPED (user-approved campaign):
   tool/schema requests now decode speculatively over TP2. Root cause of the
   AR fallback was rank 1 never seeing the constraint; the fix carries a
