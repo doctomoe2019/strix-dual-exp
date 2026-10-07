@@ -8,6 +8,16 @@ sidecar, after the prefill campaign closed (see
 against `512f62b` (deployed lineage); evidence paths are repo-relative and
 stay local.
 
+**Status 2026-10-07 (evening) — Phase 2 executed:** D2 implemented, gated and
+**rejected** (exact but immaterial; selector dispatch already free — the
+baseline shows no capacity sensitivity); its operator-test additions are kept
+in the gufo working tree. D1 **measured and closed without change**: full TP2
+cycle-cost tables captured (`evidence/decode-tg/d1-costs/`); width policy is
+ratio-driven and preserved across the production acceptance band, so no TP2
+cost profile. The first Phase-3 decision therefore falls to the sampling /
+constraint levers (D3/D4) on workload-share evidence. See
+`evidence/decode-tg/{d2-selector,d1-costs}/SUMMARY.md`.
+
 Everything below is either an established measurement (labeled with its
 source), a source-visible mechanism (labeled **unmeasured** — not a claimed
 speedup), or a historical precedent. Published speedups from the papers listed

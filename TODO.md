@@ -144,6 +144,33 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~18:40 DECODE PHASE-2 EXECUTED (D2 rejected, D1 measured-closed;
+  docs/decode-tg-plan.md status note): D2 selector live-range grids for eager
+  narrow TP2 decode were implemented in gufo (bound the score grid when the
+  executor can never graph-replay), unit-gated with new deep-capacity
+  live-range cases in the selector operator test (kept — they cover the
+  pre-existing wide-path live_blocks contract), and A/B'd on the pair with
+  interleaved tp_batched_probe MTP runs (33k-token counting prompts, 2
+  members, greedy): 4v4 bit-identical and dead even (89.3 vs 89.3 tok/s
+  medians, per-step 172 vs 172 ms), the baseline shows NO capacity
+  sensitivity (ctx 65536 == 262144), so the empty selector workgroups were
+  already free -> executor change REVERTED per no-gain doctrine. D1: full
+  TP2 cost audit over the pair (depths 0/4k/32k x C1..C8 x widths 1..8,
+  evidence/decode-tg/d1-costs/): TP2 cycles 25-35% cheaper in absolute
+  terms, but width choice is ratio-driven and the ratios are preserved --
+  optimal widths match the single-host curves across the 0.4-0.8 acceptance
+  band (production logs: 64-87%) and diverge ~1 width only where tokens/ms
+  is flat -> no TP2 profile, no concurrency-init change. INCIDENT
+  (environmental): first full-depth audit run died at the depth-0->4096
+  transition with a tbstream write timeout coincident with local NVMe I/O
+  timeouts + controller reset (dmesg); streams stayed healthy, split-depth
+  reruns clean -- new trigger candidate for the exchange-timeout family
+  alongside the recorded pc4096 hazard. Prod: maintenance block closed,
+  gufo-prod restarted, /ready green, canary spec-decoding. Gufo tree holds
+  the EXPERIMENTS row + kept test (uncommitted, per policy). NEXT by plan:
+  Phase-3 decision among D3 (grammar/penalty-aware drafts) vs D4 (compact
+  exact top-k verification) on workload-share evidence; D8 gated on
+  repetition share.
 - 2026-10-07 ~16:20 DECODE/TG PLAN RECORDED (docs/decode-tg-plan.md) after a
   read-only code audit + online research session: prefill is paused; ranked
   TG avenues D1-D9 with exactness gates, historical precedents (incl. the
