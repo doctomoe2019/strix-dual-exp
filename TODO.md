@@ -144,6 +144,17 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-07 ~16:20 DECODE/TG PLAN RECORDED (docs/decode-tg-plan.md) after a
+  read-only code audit + online research session: prefill is paused; ranked
+  TG avenues D1-D9 with exactness gates, historical precedents (incl. the
+  unattributed removals of the earlier --draft-vocab prefix view and the
+  private Q4 shortlist) and a measurement-first campaign (Phase 0
+  instrumentation -> Phase 1 baseline phase-timing matrix -> Phase 2 exact
+  small wins D2 selector live-range + D1 TP2 cost calibration -> Phase 3
+  data-chosen among grammar-aware drafting / compact exact top-k / FR-Spec
+  draft row subset -> Phase 4 gated: suffix-decoding proposer, batch drain
+  coalescing, DFlash-class evaluation). Lossy acceptance methods and
+  two-replica serving are explicit non-goals. No measurements taken yet.
 - 2026-10-07 ~15:30 WORKLOAD-SHAPE CAMPAIGN + PROD CONFIG WIN: measured the
   real agent shapes through the TP2 stack (evidence/prefill-triage/
   serve-shapes/). Findings: extensions at depth run 1969-2112 (mostly genuine
