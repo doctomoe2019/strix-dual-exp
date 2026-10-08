@@ -22,6 +22,20 @@ converged runs beat forced widths (80.8 tok/s), collapsed runs deliver
 continuation is draft-width controller stabilization** (EMA/probe/retry
 dynamics in `mtp_policy.hpp`), not cost tables or concurrency mapping.
 
+**Status 2026-10-08 (later) — AR re-probe interval 16→4 qualified,
+RETAINED and deployed** (`evidence/decode-tg/ph3-cooldown/`): 4v4 ABBA
+against the EMA-0.85 binary with bit-identical greedy outputs —
+codeA1 +7.47% [+7.09, +7.84], decA1 +2.96%, codeA2 +1.56%, decA2 +0.63%
+(all pairs positive), proseA −0.5% with an identical decision trace on
+both arms (restart noise), sampled fixtures unaffected by construction.
+Gates: unit contract updated (`kArRetryTokens`), constraints 9/9,
+held-out outputs bit-identical across builds, seeded replay exact,
+persisted-state bound kept at 16 for old snapshots. Deployed `036f07b7`
+both hosts (backup `gufo.87e2fb95`), canary 72.5 spec-decoding; gufo
+`ec775ae`. Both known controller levers (EMA 0.85, interval 4) are now
+retained; the next prototype is D5 (draft-head row subset — the head is
+9–21% of C1 decode at ~3 ms/step of pure weight streaming).
+
 **Status 2026-10-08 (afternoon) — ph2 corrected attribution + GPU split +
 cooldown screen** (`evidence/decode-tg/ph2-attribution/`). Retractions:
 the ph1 "20–45% C2 overhead" was double counting (physical-union

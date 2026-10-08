@@ -144,6 +144,23 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~10:40 AR RE-PROBE INTERVAL 16->4 RETAINED + DEPLOYED
+  (evidence/decode-tg/ph3-cooldown/): follow-up to the ph2 screen.
+  kArRetryTokens=4 (gufo ec775ae, binary 036f07b7; baseline = EMA-0.85
+  87e2fb95). 4v4 ABBA, greedy outputs bit-identical across arms/passes:
+  codeA1 +7.47% [+7.09,+7.84], decA1 +2.96% [+1.97,+3.95], codeA2
+  +1.56%, decA2 +0.63% (all pairs positive, CIs exclude zero); proseA
+  -0.52% with IDENTICAL rounds/drafts/acc on both arms -> restart noise,
+  not causal; sampled fixtures structurally unaffected (fixed policies;
+  toolsA1/A2 counts identical). Mechanism confirmed: candidate runs more
+  spec rounds on recovering fixtures (decA1 699 vs 669). Gates: unit
+  contract via kArRetryTokens + format clean; constraints 9/9; held-out
+  greedy bit-identical to baseline; seeded replay exact; Restore bound
+  kept at 16 for historical snapshots. Deployed BOTH hosts (backup
+  gufo.87e2fb95), prod /ready green, canary 72.5 tok/s 6 drafts. WIP
+  patch regenerated (15266 lines, secret-clean) + pushed. Controller
+  campaign complete: EMA 0.85 + interval 4 both live; D5 draft-head
+  subset is the next prototype.
 - 2026-10-08 ~09:30 PH2 CORRECTED ATTRIBUTION + GPU SPLIT + COOLDOWN
   SCREEN (evidence/decode-tg/ph2-attribution/): diag build 3477a348
   (hipEvent trunk|head|download split on the executing rank + shared

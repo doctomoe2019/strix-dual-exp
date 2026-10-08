@@ -185,18 +185,19 @@ index b3832f4..46e5f79 100644
  and `previous_response_id` remain unsupported.
  
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..2e88f76 100644
+index 0b6a02b..4cd0f42 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  
  | Experiment | Decision / evidence |
  | --- | --- |
 +| Draft-acceptance EMA memory 0.75 → 0.85 | Retained. Matched-input serving traces (fixed prompts, three bit-identical passes) show the width controller within ~8% of the per-request forced-width optimum on hard text and ahead of every fixed width on easy text; the loss concentrates in cooldown-retry storms (26% of rounds on hard/tools fixtures). The slower estimator damps those storms: 4v4 paired serving A/B gains +3.1/+1.7/+4.0/+2.0% on hard-story/easy-story/code/prose fixtures (every pair positive, CIs exclude zero, greedy outputs bit-identical across arms), one code sibling −0.8% (CI includes zero), sampled tools ~flat with one fixture +9%. Backoff to AR still arms within ~9 fully rejected cycles; controller unit tests updated to that contract. Evidence: strix-dual-exp `evidence/decode-tg/d1-stabilization`. |
++| AR re-probe interval 16 → 4 tokens | Retained. After the cost model rules out speculation, the controller waited 16 autoregressive tokens before retrying a proposal; re-arms during hard text delayed recovery by several intervals per request. Re-probing after 4 tokens (one catch-up cycle): 4v4 paired serving A/B against the EMA-0.85 binary, greedy outputs bit-identical across arms and passes, gains +7.5% on the AR-heavy code fixture [+7.09, +7.84], +3.0% hard story, +1.6% code and +0.6% easy story (all pairs positive), prose −0.5% with an identical round/draft/acceptance trace on both arms (restart noise, not causal), sampled fixtures unaffected by construction (deterministic fixed policies). Constraints suite 9/9; held-out greedy prompts bit-identical to the baseline build; seeded replay exact; the sustained-failure backoff contract is unchanged (EMA-driven, ~9 fully rejected cycles). Evidence: strix-dual-exp `evidence/decode-tg/ph3-cooldown`. |
  | Conversation checkpoints and asynchronous capture | Retained: edits, growing histories and rotation with bounded RAM; AR/MTP cancellation, image replay and disk restart pass, including four execution sessions. Intermediate copies allow peers to continue, and coincident RAM/disk boundaries share one copy. [Functional checks](../../../tests/functional/README.md). |
  | Prefix-independent MTP cache projections | Retained: exact seeded replay across prompt splits and checkpoint replacement, using shared Q8 row arithmetic. [Checks and timings](artifacts/mtp-cache-replay.json). |
  | Skip discarded MTP outputs | Retained: K/V-only prefill, compact catch-up and wider projection tiles; C1 costs remeasured. Prefill is within 0.3% of main; d0 TG remains 1.1% slower, d4K TG is 0.4% faster. |
-@@ -46,6 +47,9 @@
+@@ -46,6 +48,9 @@
  | Batched MTP catch-up tail | Retained; after writing every attention cache row, compact final request rows into existing scratch and skip unused output projections/FFNs. Preserve the scalar arithmetic of one-row tails; full-head candidates and recursive carry match independent execution. |
  | Routed Q8 accumulation order | Retained; explicit rounded product/FMA prevents identical rows changing with column placement. Independent FP64 dot and predictor carry checks pass. |
  | Isolated MMQ quantizer rounding change | Deferred: it changes half-integer tie behavior shared with W8A8 and fails their existing agreement gate. No quantizer change retained. |
@@ -206,7 +207,7 @@ index 0b6a02b..2e88f76 100644
  | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
  | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
  | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
-@@ -65,6 +69,14 @@
+@@ -65,6 +70,14 @@
  | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
  | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
  | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
@@ -221,7 +222,7 @@ index 0b6a02b..2e88f76 100644
  
  Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
  to dense projections and 12.6% to attention/indexing. Final-tile catch-up
-@@ -113,3 +125,41 @@ Development measurements, not published cells.
+@@ -113,3 +126,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -7136,10 +7137,10 @@ index 386bae7..a7360df 100644
      return finished.peer;
    }
 diff --git a/src/models/qwen38_flash_next/mtp_policy.hpp b/src/models/qwen38_flash_next/mtp_policy.hpp
-index 59bd857..115e088 100644
+index 59bd857..38ab4ca 100644
 --- a/src/models/qwen38_flash_next/mtp_policy.hpp
 +++ b/src/models/qwen38_flash_next/mtp_policy.hpp
-@@ -14,6 +14,14 @@ namespace gufo::models::qwen38_flash_next {
+@@ -14,6 +14,21 @@ namespace gufo::models::qwen38_flash_next {
  
  inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
  
@@ -7151,10 +7152,17 @@ index 59bd857..115e088 100644
 +// off to AR within ~9 fully-rejected cycles.
 +inline constexpr float kAcceptanceEmaDecay = 0.85F;
 +
++// After the cost model rules out speculation, re-probe after this many
++// autoregressive tokens. 2026-10-08 screen (ph2-attribution): 16 delayed
++// recovery on hard text by several re-arms per request; 4 recovered the
++// AR-heavy fixture by 8-10% with easy text unaffected, so the interval
++// only needs to cover one catch-up cycle before retrying.
++inline constexpr std::uint32_t kArRetryTokens = 4;
++
  struct MtpLengthState {
    std::array<float, kMaxMtpDraftTokens> successes;
    std::array<float, kMaxMtpDraftTokens> failures;
-@@ -64,10 +72,10 @@ public:
+@@ -64,10 +79,10 @@ public:
      accepted = std::min(accepted, drafted);
      const auto observed = accepted + (accepted < drafted ? 1 : 0);
      for (std::size_t depth = 0; depth < observed; ++depth) {
@@ -7169,6 +7177,25 @@ index 59bd857..115e088 100644
      }
      // A fully accepted chain supplies no observations for its tail. Probe
      // farther rather than permanently treating those depths as the prior.
+@@ -85,7 +100,7 @@ public:
+     if (accepted < drafted)
+       state_.failed_depths |= 1U << accepted;
+     if (BestLength(limit_, context) == 0)
+-      state_.retry_tokens = 16;
++      state_.retry_tokens = kArRetryTokens;
+   }
+ 
+   void ObserveArToken() noexcept {
+@@ -106,6 +121,9 @@ public:
+   [[nodiscard]] MtpLengthState State() const noexcept { return state_; }
+ 
+   [[nodiscard]] bool Restore(const MtpLengthState& state) noexcept {
++    // The retry bound validates the historical persisted range, which is
++    // wider than what this build arms; a restored longer interval simply
++    // counts down before the first re-probe.
+     if (state.retry_tokens > 16 || state.probe_depth > limit_ ||
+         state.explored_depth > limit_ || state.probe_delay > 16 ||
+         state.failed_depths >= (1U << limit_))
 diff --git a/tests/cli/http_server_test.cpp b/tests/cli/http_server_test.cpp
 index cdf4159..95f225c 100644
 --- a/tests/cli/http_server_test.cpp
@@ -12074,6 +12101,19 @@ index 7b51436..bae31bc 100644
      constexpr std::size_t kHcDim = static_cast<std::size_t>(kHidden) * kStreams;
      constexpr std::size_t kRows = static_cast<std::size_t>(kTokens) * kHcDim;
      constexpr std::size_t kMixed = static_cast<std::size_t>(kTokens) * kHidden;
+diff --git a/tests/models/qwen38_flash_next/mtp_sampling_test.cpp b/tests/models/qwen38_flash_next/mtp_sampling_test.cpp
+index 6e5f669..900022e 100644
+--- a/tests/models/qwen38_flash_next/mtp_sampling_test.cpp
++++ b/tests/models/qwen38_flash_next/mtp_sampling_test.cpp
+@@ -41,7 +41,7 @@ void CheckLengthController() {
+           "unprofitable speculation did not back off to AR");
+   qfn::MtpLengthController backed_off(7);
+   Require(backed_off.Restore(controller.State()), "backoff restore failed");
+-  for (unsigned i = 0; i < 16; ++i) {
++  for (unsigned i = 0; i < qfn::kArRetryTokens; ++i) {
+     Require(controller.Choose(7) == 0 && backed_off.Choose(7) == 0,
+             "AR interval ended early");
+     controller.ObserveArToken();
 diff --git a/tests/models/qwen38_flash_next/prefill_probe.cpp b/tests/models/qwen38_flash_next/prefill_probe.cpp
 new file mode 100644
 index 0000000..33948b4
