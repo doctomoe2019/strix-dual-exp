@@ -22,6 +22,23 @@ converged runs beat forced widths (80.8 tok/s), collapsed runs deliver
 continuation is draft-width controller stabilization** (EMA/probe/retry
 dynamics in `mtp_policy.hpp`), not cost tables or concurrency mapping.
 
+**Status 2026-10-08 (afternoon) — ph2 corrected attribution + GPU split +
+cooldown screen** (`evidence/decode-tg/ph2-attribution/`). Retractions:
+the ph1 "20–45% C2 overhead" was double counting (physical-union
+accounting leaves 0.1–3% unattributed), and zdead is an upper bound only
+(top-k/top-p also zero proposals). New measurements: **transport/
+mirroring ≈ 0** (rank-matched diffs +0.05 ms/call); **sampled full-vocab
+download ≈ 1 ms/call — D4 closed definitively**; verify-head share 5–9%
+of the forward (vocab-parallel head bounded ~4–7%, below bar); completed
+thinking-off constrained traffic healthy (65–92 tok/s, sub-second); and
+the **draft head is 9–21% of C1 decode wall** (~3 ms/step, pure 640 MB
+Q8 weight streaming, hidden inside ph1's fused `dr`) — **D5 promoted to
+top prototype** (prefix-subset screen first, then frequency-ranked
+subset only if acceptance survives). A **cooldown screen (16/8/4)**
+shows +8–10% on the AR-heavy code fixture at r4 with easy fixtures flat
+and outputs bit-identical — ready as a bounded qualification candidate
+on the retained EMA 0.85 base.
+
 **Status 2026-10-08 (morning) — Phase 0+1 executed; Phase 3 closed with
 none of D3/D4/D5 promoted.** A diagnostic phase-trace build (per-phase
 rank-0 wall timers + grammar/zero-p attribution, patch preserved in

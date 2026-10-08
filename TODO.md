@@ -144,6 +144,26 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~09:30 PH2 CORRECTED ATTRIBUTION + GPU SPLIT + COOLDOWN
+  SCREEN (evidence/decode-tg/ph2-attribution/): diag build 3477a348
+  (hipEvent trunk|head|download split on the executing rank + shared
+  trace handle + GUFO_RETRY_TOKENS; patch reverted after, tree clean,
+  format pass, overhead calibrated to zero vs the retained binary).
+  RETRACTIONS: ph1's "20-45% C2 overhead" was double counting (union
+  accounting: 0.1-3% unattributed); zdead is only an upper bound for
+  grammar rejections. MEASURED: transport/mirroring +0.05ms/call (~0);
+  sampled full-vocab download ~1ms/call (D4 closed definitively);
+  verify-head 5-9% of the forward (vocab-parallel head ~4-7% e2e, below
+  bar); DRAFT HEAD = 9-21% of C1 decode wall (~3ms/step, 640MB Q8 weight
+  streaming, was hidden in ph1's fused dr) -> D5 PROMOTED to top
+  prototype (prefix-subset screen, then frequency-ranked subset only if
+  acceptance survives). Completed thinking-off constrained traffic
+  healthy: tool 85-92 tok/s finish tool_calls, json 65-74 finish stop,
+  all sub-second (matrix2 16/16; client tuple-bug found via server 400).
+  COOLDOWN SCREEN 16/8/4 (hard fixtures, outputs bit-identical):
+  AR-heavy code +8-10% at r4 (47.5-48.5 -> 51.1-52.3 tok/s), easy
+  fixtures flat -> ready as a bounded qualification candidate. Ops:
+  three pair restarts clean, prod restored first, canary 71.6.
 - 2026-10-08 ~07:40 PHASE 0+1 EXECUTED, PHASE 3 CLOSED (evidence/decode-tg/
   ph1-attribution/): extended the d1-stabilization cycle-trace patch with
   per-phase rank-0 wall timers (catch-up, draft build/head/body, verify
