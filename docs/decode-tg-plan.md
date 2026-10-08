@@ -22,6 +22,27 @@ converged runs beat forced widths (80.8 tok/s), collapsed runs deliver
 continuation is draft-width controller stabilization** (EMA/probe/retry
 dynamics in `mtp_policy.hpp`), not cost tables or concurrency mapping.
 
+**Status 2026-10-08 (night) — D5 qualified, RETAINED as `--draft-vocab`
+and DEPLOYED at 131072** (`evidence/decode-tg/d5-qualification/`).
+Same-binary 4v4 A/B (flag-isolated): decA2 **+10.93%** [+10.51, +11.35],
+proseA +7.5%, codeA1/A2 +6.4/+5.0%, sampled tools +4.2/+7.1%, decA1
++4.4% (one noise pair; decision trace identical); outputs and held-out
+hashes bit-identical flag-on/off, seeded replay exact, constraints 9/9.
+Multilingual panel forced the option shape: ja −10%, ru/ar −19% at
+128K (their tokens sit above the prefix; acceptance → ~50%), while
+de/fr/zh/mixed stay neutral and emoji gains — so the default keeps the
+full head and the deployment enables 131072 for this English/code/tools
+workload (`SERVE_DRAFT_VOCAB` guardian passthrough). Deployed `bd647f66`
+both hosts; prod canaries 76.9–87.5 tok/s — the campaign's three
+retained levers (EMA 0.85, interval-4, draft-vocab) moved the frozen
+panel from 47–81 to 51–91 tok/s. Harness incident recorded: one ABBA
+attempt served a stale pair after a silent stop failure (runs
+quarantined; the launcher now refuses held ports/leftover ranks and
+fails stops that leave rank0 alive). Remaining known avenue:
+frequency-ranked noncontiguous subset (would cover common high-ID
+scripts; index-mapped head kernels — parked unless multilingual traffic
+matters). Verify-forward economics remain acceptance/batching-bound.
+
 **Status 2026-10-08 (evening) — D5 screen: draft-head prefix subset
 +5–18% with output invariance at ≥128K rows** (`evidence/decode-tg/
 d5-draft-vocab/`). `GUFO_DRAFT_VOCAB` row clamp on the draft head only

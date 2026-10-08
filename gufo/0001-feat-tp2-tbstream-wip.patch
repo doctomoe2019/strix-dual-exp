@@ -185,19 +185,20 @@ index b3832f4..46e5f79 100644
  and `previous_response_id` remain unsupported.
  
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..4cd0f42 100644
+index 0b6a02b..48585bf 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-@@ -2,6 +2,8 @@
+@@ -2,6 +2,9 @@
  
  | Experiment | Decision / evidence |
  | --- | --- |
 +| Draft-acceptance EMA memory 0.75 → 0.85 | Retained. Matched-input serving traces (fixed prompts, three bit-identical passes) show the width controller within ~8% of the per-request forced-width optimum on hard text and ahead of every fixed width on easy text; the loss concentrates in cooldown-retry storms (26% of rounds on hard/tools fixtures). The slower estimator damps those storms: 4v4 paired serving A/B gains +3.1/+1.7/+4.0/+2.0% on hard-story/easy-story/code/prose fixtures (every pair positive, CIs exclude zero, greedy outputs bit-identical across arms), one code sibling −0.8% (CI includes zero), sampled tools ~flat with one fixture +9%. Backoff to AR still arms within ~9 fully rejected cycles; controller unit tests updated to that contract. Evidence: strix-dual-exp `evidence/decode-tg/d1-stabilization`. |
 +| AR re-probe interval 16 → 4 tokens | Retained. After the cost model rules out speculation, the controller waited 16 autoregressive tokens before retrying a proposal; re-arms during hard text delayed recovery by several intervals per request. Re-probing after 4 tokens (one catch-up cycle): 4v4 paired serving A/B against the EMA-0.85 binary, greedy outputs bit-identical across arms and passes, gains +7.5% on the AR-heavy code fixture [+7.09, +7.84], +3.0% hard story, +1.6% code and +0.6% easy story (all pairs positive), prose −0.5% with an identical round/draft/acceptance trace on both arms (restart noise, not causal), sampled fixtures unaffected by construction (deterministic fixed policies). Constraints suite 9/9; held-out greedy prompts bit-identical to the baseline build; seeded replay exact; the sustained-failure backoff contract is unchanged (EMA-driven, ~9 fully rejected cycles). Evidence: strix-dual-exp `evidence/decode-tg/ph3-cooldown`. |
++| `--draft-vocab` leading-row limit for the draft head | Retained as an option (default off). The draft head streams its complete Q8 output matrix per proposal step — memory-bound, 9–21% of decode wall — while generated text for ordinary/tool traffic stays in the low-ID core: the option restricts proposals to the leading rows with target verification untouched, so outputs remain target-decided and bit-identical (proven on English, tool, JSON and multilingual panels including CJK, Cyrillic, Arabic and emoji). Same-binary 4v4 A/B with `--draft-vocab 131072` (53% of 248 320 rows): decA2 +10.9%, proseA +7.5%, toolsA1/A2 +4.2/+7.1%, codeA1/A2 +6.4/+5.0%, decA1 +4.4% (one noise pair; decision trace identical), greedy outputs and held-out hashes bit-identical, seeded replay exact, constraints 9/9. Trade-off: scripts whose tokens sit above the prefix lose draft coverage — Japanese −10%, Russian/Arabic −19% at 131072 while German/French/Chinese/mixed stay neutral and emoji gains — so the default keeps the full head; deployments with low-ID-dominant traffic (English/code/tools agents) enable the limit. Continuation identities record the configured row count; sampled replay within a build is exact and cross-build replay changes with the value. Evidence: strix-dual-exp `evidence/decode-tg/d5-{draft-vocab,qualification}`. |
  | Conversation checkpoints and asynchronous capture | Retained: edits, growing histories and rotation with bounded RAM; AR/MTP cancellation, image replay and disk restart pass, including four execution sessions. Intermediate copies allow peers to continue, and coincident RAM/disk boundaries share one copy. [Functional checks](../../../tests/functional/README.md). |
  | Prefix-independent MTP cache projections | Retained: exact seeded replay across prompt splits and checkpoint replacement, using shared Q8 row arithmetic. [Checks and timings](artifacts/mtp-cache-replay.json). |
  | Skip discarded MTP outputs | Retained: K/V-only prefill, compact catch-up and wider projection tiles; C1 costs remeasured. Prefill is within 0.3% of main; d0 TG remains 1.1% slower, d4K TG is 0.4% faster. |
-@@ -46,6 +48,9 @@
+@@ -46,6 +49,9 @@
  | Batched MTP catch-up tail | Retained; after writing every attention cache row, compact final request rows into existing scratch and skip unused output projections/FFNs. Preserve the scalar arithmetic of one-row tails; full-head candidates and recursive carry match independent execution. |
  | Routed Q8 accumulation order | Retained; explicit rounded product/FMA prevents identical rows changing with column placement. Independent FP64 dot and predictor carry checks pass. |
  | Isolated MMQ quantizer rounding change | Deferred: it changes half-integer tie behavior shared with W8A8 and fails their existing agreement gate. No quantizer change retained. |
@@ -207,7 +208,7 @@ index 0b6a02b..4cd0f42 100644
  | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
  | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
  | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
-@@ -65,6 +70,14 @@
+@@ -65,6 +71,14 @@
  | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
  | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
  | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
@@ -222,7 +223,7 @@ index 0b6a02b..4cd0f42 100644
  
  Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
  to dense projections and 12.6% to attention/indexing. Final-tile catch-up
-@@ -113,3 +126,41 @@ Development measurements, not published cells.
+@@ -113,3 +127,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -264,6 +265,24 @@ index 0b6a02b..4cd0f42 100644
 +| Finer GDN row-split blocks on a TP rank (2026-10-05) | Retained. The 256-thread row-split kernel covers 64 state rows per block, so a TP rank's 24 value heads launch only 2×24 = 48 blocks against a full host's 96; the kernel is now block-size-templated and a rank's geometry dispatches 128-thread/32-row blocks (4×24 = 96, same per-row lanes and DPP reduction, so bit-exact — member checksums canonical in every session; the operator test gained the 8-key/24-value-head geometry with its F64 recurrence checks). Kernel mean 1 466.6 → 1 294.5 µs (**−11.7 %**, 844.7 → 745.6 ms per 32 k prefill) with routed-GEMM/attention/combine controls within 0.2 % in matched profiles; end-to-end @32 k **+0.19/+1.04/+0.60/−0.47/+0.03/+0.99 % (5/6 clean pairs, median +0.40 %)**, 8 k even (−0.4 % within the paired drift). |
 +| Routed epilogue dead-tile skipping (2026-10-05) | Rejected. Bounding the paired gate/up and wide F16-output epilogue loops by `live_tok_tiles` (every dropped iteration was write-guarded no-op) made the routed kernels *slower*: +6–9 % per call in a matched profile (controls: GDN/attention/combine within 1 %) and **−2.45 % end-to-end** in a clean pair. Replacing the constant unrolled trip count with the runtime bound perturbed the live path's scheduling more than the dead tiles cost; the epilogue tails are not the routed family's bound (consistent with the earlier 256-row down-projection rejection). A predicated-body variant that keeps the unrolled form remains untested; expected ceiling ≤0.3 % end-to-end. |
 +| TP2 split of the fused HC mixer down (2026-10-05) | Rejected. Each rank computed half of the 320 low-rank rows — F32 out, with `SiluScale` plus the assembly's round-to-nearest reproducing the fused epilogue bit for bit (operator check exact at 96/2 049 tokens; end-to-end member checksums canonical) — and a tagged start/finish pair was added to the tbstream transport so the mid-part exchange can interleave with the part-boundary exchanges. But a mid-part exchange cannot hide on this transport: the single staging worker serializes each 1.25 MB mixer half behind the preceding 20 MB part-boundary staging (~10 ms), so all 1 504 mixer calls pay ~5 ms of exposed latency — the timed 32 k prefill fell to **1 490 tok/s (−35 %)** against a modeled 260 ms GPU saving. The replicated mixer family is closed for exchange-based splits until small exchanges can be GPU-staged mid-part (the queued path stages on-GPU; the pair loop's boundary exchanges would have to move there first). Measurement trap found on the way: the probe's communicator decorator must delegate new transport methods, or a gated route silently never runs — the first four "A/B" pairs of this experiment were accidental A/A until a profile showed zero assembly-kernel launches. |
+diff --git a/docs/models/qwen3.8-flash-next/QUALITY.md b/docs/models/qwen3.8-flash-next/QUALITY.md
+index 574b4c6..b2d130b 100644
+--- a/docs/models/qwen3.8-flash-next/QUALITY.md
++++ b/docs/models/qwen3.8-flash-next/QUALITY.md
+@@ -26,8 +26,11 @@ matched-prefill AR/MTP logits and sampled snapshot replay are exact at
+ 
+ Sampled MTP can consume different RNG draws from AR. Seeded replay requires
+ the same build, request budget, capacity and sampling configuration; live cost
+-timings only steer greedy decoding. Draft sampling uses the full Q8 head's
+-top 64 logits; upstream draft-sampler equivalence is not claimed.
++timings only steer greedy decoding. Draft sampling uses the top 64 logits of
++the draft head's rows — the complete head by default, or the leading
++`--draft-vocab` rows when configured; proposals outside that range fail
++verification and decode falls back per-token, so outputs stay
++target-determined. Upstream draft-sampler equivalence is not claimed.
+ MTP cache projections now keep the same arithmetic across prompt splits.
+ Older Flash-Next disk checkpoints are rejected and rebuilt once.
+ 
 diff --git a/docs/models/qwen3.8-flash-next/TP2.md b/docs/models/qwen3.8-flash-next/TP2.md
 index 348be6e..e6e5e3f 100644
 --- a/docs/models/qwen3.8-flash-next/TP2.md
@@ -518,10 +537,51 @@ index 06d290c..a943dc4 100644
                                           "' is not supported on this endpoint");
      }
 diff --git a/src/cli/serve/inference_backend.cpp b/src/cli/serve/inference_backend.cpp
-index 78898e1..c8433fe 100644
+index 78898e1..262d80a 100644
 --- a/src/cli/serve/inference_backend.cpp
 +++ b/src/cli/serve/inference_backend.cpp
-@@ -2579,6 +2579,7 @@ public:
+@@ -45,6 +45,7 @@
+ #include "src/models/qwen/hip/executor.hpp"
+ #include "src/models/qwen38_flash_next/engine.hpp"
+ #include "src/models/qwen38_flash_next/kernels/rocm/communicator.hpp"
++
+ #endif
+ 
+ namespace gufo::server {
+@@ -338,7 +339,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
+ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
+     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
+     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
+-    std::uint32_t decode_concurrency) {
++    std::uint32_t decode_concurrency, std::uint32_t draft_vocab_rows) {
+   if (!IsSha256Hex(artifact_fingerprint)) {
+     throw std::invalid_argument(
+         "Qwen3.8-Flash-Next disk cache requires an artifact fingerprint");
+@@ -369,6 +370,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
+              << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
+              << mtp_fingerprint << '\n'
+              << "draft_max_tokens=" << max_draft_tokens << '\n'
++             << "draft_vocab_rows=" << draft_vocab_rows << '\n'
+              << "draft_cost_concurrency=" << decode_concurrency << '\n';
+   }
+   const std::string canonical = identity.str();
+@@ -2553,13 +2555,14 @@ public:
+         max_context_(max_context),
+         use_mtp_(use_mtp),
+         max_draft_tokens_(max_draft_tokens),
++        draft_vocab_rows_(use_mtp_ ? model_->MtpDraftRows() : 0),
+         distributed_(model_->TpWorldSize() > 1) {
+     if (!artifact_fingerprint.empty()) {
+       persistence_ = TextRunnerPersistenceDescriptor{
+           .compatibility_identity = QwenFlashNextCompatibilityIdentity(
+               artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
+               use_mtp_, max_context_, max_draft_tokens_,
+-              model_->DecodeConcurrency()),
++              model_->DecodeConcurrency(), draft_vocab_rows_),
+           .payload_version =
+               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
+       };
+@@ -2579,6 +2582,7 @@ public:
          .model_id = model_->ModelName(),
          .state_abi = std::string(kQwenFlashNextStateAbi),
          .max_context = max_context_,
@@ -529,7 +589,7 @@ index 78898e1..c8433fe 100644
          .capabilities =
              TextRunnerCapabilities{
                  .incremental_prefill = true,
-@@ -2643,6 +2644,32 @@ public:
+@@ -2643,6 +2647,32 @@ public:
          });
    }
  
@@ -562,7 +622,7 @@ index 78898e1..c8433fe 100644
    [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
        std::string_view text) const override {
      return model_->tokenizer().Encode(text);
-@@ -2801,7 +2828,10 @@ public:
+@@ -2801,7 +2831,10 @@ public:
        TextRunnerState& state, std::size_t max_tokens,
        sampling::SamplerState& sampler) const override {
      if (!use_mtp_ || max_tokens == 1) {
@@ -574,7 +634,7 @@ index 78898e1..c8433fe 100644
      }
      if (max_tokens == 0) {
        throw std::invalid_argument(
-@@ -2834,6 +2864,10 @@ public:
+@@ -2834,6 +2867,10 @@ public:
      step.draft_rounds = stats_after.cycles - stats_before.cycles;
      step.draft_tokens = stats_after.drafted - stats_before.drafted;
      step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
@@ -585,7 +645,7 @@ index 78898e1..c8433fe 100644
      return step;
    }
  
-@@ -2951,6 +2985,8 @@ public:
+@@ -2951,6 +2988,8 @@ public:
        step.draft_rounds = stats.cycles - before[i].cycles;
        step.draft_tokens = stats.drafted - before[i].drafted;
        step.draft_accepted_tokens = stats.accepted - before[i].accepted;
@@ -594,7 +654,15 @@ index 78898e1..c8433fe 100644
      }
      return steps;
    }
-@@ -3189,7 +3225,7 @@ struct InferenceBackend::Impl {
+@@ -3064,6 +3103,7 @@ private:
+   std::uint32_t max_context_;
+   bool use_mtp_;
+   std::uint32_t max_draft_tokens_;
++  std::uint32_t draft_vocab_rows_;
+   bool distributed_{false};
+   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+ };
+@@ -3189,7 +3229,7 @@ struct InferenceBackend::Impl {
            tool_format_(tool_format),
            tp_(std::move(tp)) {
        if (initial == InitialOutputState::kReasoning)
@@ -603,7 +671,7 @@ index 78898e1..c8433fe 100644
      }
  
      ~ScheduledGenerationRequest() override {
-@@ -3226,13 +3262,8 @@ struct InferenceBackend::Impl {
+@@ -3226,13 +3266,8 @@ struct InferenceBackend::Impl {
        if (local_error != nullptr) {
          std::rethrow_exception(local_error);
        }
@@ -619,7 +687,7 @@ index 78898e1..c8433fe 100644
        return result;
      }
  
-@@ -3272,7 +3303,8 @@ struct InferenceBackend::Impl {
+@@ -3272,7 +3307,8 @@ struct InferenceBackend::Impl {
        bool cache_prompt, std::size_t cache_prefix_tokens,
        std::shared_ptr<const TextPromptContext> context, bool return_progress,
        std::optional<sampling::JsonConstraint::ToolFormat> tool_format,
@@ -629,7 +697,7 @@ index 78898e1..c8433fe 100644
      if (state->tp_runner == nullptr || state->response_broker == nullptr ||
          state->communicator == nullptr || state->scheduler == nullptr) {
        throw std::logic_error("TP2 rank 0 is not fully configured");
-@@ -3308,6 +3340,7 @@ struct InferenceBackend::Impl {
+@@ -3308,6 +3344,7 @@ struct InferenceBackend::Impl {
          .cache_prefix_tokens = static_cast<std::uint32_t>(cache_prefix_tokens),
          .client_id = client_id,
          .sampling = sampling,
@@ -637,7 +705,7 @@ index 78898e1..c8433fe 100644
          .stop_at_eos = stop_at_eos,
      };
      if (context != nullptr) {
-@@ -3346,6 +3379,16 @@ struct InferenceBackend::Impl {
+@@ -3346,6 +3383,16 @@ struct InferenceBackend::Impl {
        tp_open->fetch_sub(1);
        throw std::runtime_error("TP worker command failed: " + error);
      }
@@ -654,7 +722,7 @@ index 78898e1..c8433fe 100644
      state->tp_runner->BeginRequest(begin.sequence);
      auto tp = std::make_unique<TpRequest>(state, tp_open, begin.sequence);
      try {
-@@ -3362,6 +3405,7 @@ struct InferenceBackend::Impl {
+@@ -3362,6 +3409,7 @@ struct InferenceBackend::Impl {
                .stop_at_eos = stop_at_eos,
                .stop_sequences = std::move(stop_sequences),
                .return_progress = return_progress,
@@ -662,7 +730,7 @@ index 78898e1..c8433fe 100644
            });
        return std::make_shared<ScheduledGenerationRequest>(
            state, std::move(scheduled), initial, tool_format, std::move(tp));
-@@ -3383,7 +3427,8 @@ struct InferenceBackend::Impl {
+@@ -3383,7 +3431,8 @@ struct InferenceBackend::Impl {
        std::shared_ptr<const TextPromptContext> context = {},
        bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
        const std::vector<std::string>& stop_sequences = {},
@@ -672,7 +740,7 @@ index 78898e1..c8433fe 100644
      Result result;
      result.prompt_tokens = prompt_tokens.size();
      result.client_id = client_id.empty() ? "anonymous" : client_id;
-@@ -3400,7 +3445,7 @@ struct InferenceBackend::Impl {
+@@ -3400,7 +3449,7 @@ struct InferenceBackend::Impl {
            current, std::move(prompt_tokens), max_tokens, sampling, is_cancelled,
            static_cast<bool>(on_token), client_id, stop_sequences, initial,
            request_start, cache_prompt, cache_prefix_tokens, std::move(context),
@@ -681,7 +749,7 @@ index 78898e1..c8433fe 100644
        return generation->Wait(on_token, {}, {});
      }
  
-@@ -3415,6 +3460,7 @@ struct InferenceBackend::Impl {
+@@ -3415,6 +3464,7 @@ struct InferenceBackend::Impl {
              .cache_prompt = cache_prompt,
              .cache_prefix_tokens = cache_prefix_tokens,
              .stop_sequences = stop_sequences,
@@ -689,7 +757,15 @@ index 78898e1..c8433fe 100644
          });
      ScheduledGenerationRequest generation(std::move(current),
                                            std::move(request), initial);
-@@ -3981,6 +4027,8 @@ bool InferenceBackend::load(
+@@ -3570,6 +3620,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
+             .vision_model_path = vision_model_path,
+             .decode_concurrency = static_cast<std::uint32_t>(
+                 std::clamp<std::size_t>(session_count, 1, 8)),
++            .mtp_draft_rows = speculative_config.draft_vocab_rows,
+             .tp_rank = tp_config.rank,
+             .tp_world_size = tp_config.world_size,
+             .hip_device = tp_config.hip_device,
+@@ -3981,6 +4032,8 @@ bool InferenceBackend::load(
            .sessions = static_cast<std::uint32_t>(session_count),
            .vision = has_vision,
            .disk_cache = DiskCacheEnabled(disk_cache_config),
@@ -698,7 +774,7 @@ index 78898e1..c8433fe 100644
        };
        std::string control_error;
        if (!tp_config.control->Handshake(control_config, &control_error)) {
-@@ -4296,19 +4344,24 @@ InferenceBackend::Result InferenceBackend::chat(
+@@ -4296,19 +4349,24 @@ InferenceBackend::Result InferenceBackend::chat(
      return {};
    }
    auto effective_sampling = sampling_config;
@@ -727,7 +803,7 @@ index 78898e1..c8433fe 100644
  #else
    (void)request;
    (void)max_tokens;
-@@ -4343,7 +4396,7 @@ InferenceBackend::start_complete(
+@@ -4343,7 +4401,7 @@ InferenceBackend::start_complete(
          is_cancelled, stream_output,
          client_id.empty() ? "anonymous" : std::string(client_id),
          stop_sequences, InitialOutputState::kContent, request_start, true, 0,
@@ -736,7 +812,7 @@ index 78898e1..c8433fe 100644
    }
    auto scheduled_request = state->scheduler->Submit(
        std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
-@@ -4383,8 +4436,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4383,8 +4441,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
  
    auto effective_sampling = sampling_config;
    std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
@@ -749,7 +825,7 @@ index 78898e1..c8433fe 100644
    const auto& effective_request = constrained ? *constrained : request;
    auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
    if (!prompt.has_value() || prompt->tokens.empty()) {
-@@ -4394,13 +4449,15 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4394,13 +4454,15 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
  
    const std::string client_id =
        request.client_id.empty() ? "anonymous" : request.client_id;
@@ -768,7 +844,7 @@ index 78898e1..c8433fe 100644
    }
    auto scheduled_request = state->scheduler->Submit(
        std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
-@@ -4414,6 +4471,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
+@@ -4414,6 +4476,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
            .cache_prefix_tokens = prompt->cache_prefix_tokens,
            .stop_sequences = request.stop_sequences,
            .return_progress = request.return_progress,
@@ -776,6 +852,21 @@ index 78898e1..c8433fe 100644
        });
    return std::make_shared<Impl::ScheduledGenerationRequest>(
        state, std::move(scheduled_request),
+diff --git a/src/cli/serve/inference_backend.hpp b/src/cli/serve/inference_backend.hpp
+index 4f8857c..5fd0f6a 100644
+--- a/src/cli/serve/inference_backend.hpp
++++ b/src/cli/serve/inference_backend.hpp
+@@ -48,6 +48,10 @@ struct TextSpeculativeConfig {
+   std::string draft_model_path;
+   std::uint32_t max_draft_tokens{7};
+   std::uint32_t min_draft_tokens{1};
++  /// Leading vocabulary rows the draft head may propose from; 0 keeps the
++  /// complete head. Reduces the draft head's streamed weight bytes; target
++  /// verification always reads every row, so outputs stay target-decided.
++  std::uint32_t draft_vocab_rows{0};
+   speculative::DFlashDraftPolicy dflash_policy{
+       speculative::DFlashDraftPolicy::kAdaptive};
+ };
 diff --git a/src/cli/serve/openai_chat.cpp b/src/cli/serve/openai_chat.cpp
 index 3bbc0b4..d707a18 100644
 --- a/src/cli/serve/openai_chat.cpp
@@ -1269,7 +1360,7 @@ index 7fa60e9..f7d526a 100644
  
  #endif
 diff --git a/src/cli/serve/serve.cpp b/src/cli/serve/serve.cpp
-index e21cbbc..f1ca183 100644
+index e21cbbc..7adaa80 100644
 --- a/src/cli/serve/serve.cpp
 +++ b/src/cli/serve/serve.cpp
 @@ -46,6 +46,9 @@
@@ -1282,7 +1373,15 @@ index e21cbbc..f1ca183 100644
  #include "src/cli/serve/tts_service.hpp"
  #include "src/cli/serve/video_jobs.hpp"
  #include "src/cli/video/video.hpp"
-@@ -620,6 +623,8 @@ void PrintServeHelp(std::string_view program_name,
+@@ -595,6 +598,7 @@ void PrintServeHelp(std::string_view program_name,
+     std::string vision_model_path;
+     std::size_t draft_tokens = 7;
+     std::size_t min_draft_tokens = 1;
++    std::size_t draft_vocab_rows = 0;
+     std::size_t prefill_chunk_tokens =
+         server::kDefaultDecodeActivePrefillTokens;
+     std::size_t max_pending_requests = 16;
+@@ -620,6 +624,8 @@ void PrintServeHelp(std::string_view program_name,
      std::uint32_t tp_control_port = 18516;
      std::string tp_bootstrap_host;
      std::string tp_control_token;
@@ -1291,7 +1390,7 @@ index e21cbbc..f1ca183 100644
      bool log_progress = false;
  
      gufo::cli::ArgParser parser(
-@@ -666,6 +671,12 @@ void PrintServeHelp(std::string_view program_name,
+@@ -666,6 +672,12 @@ void PrintServeHelp(std::string_view program_name,
                       "RDMA GID index (default: 0 on InfiniBand, the port's "
                       "RoCE v2 GID on RoCE)",
                       "TP2", &tp_gid_index);
@@ -1304,7 +1403,26 @@ index e21cbbc..f1ca183 100644
  
      // Sampling Defaults
      parser.AddOption(
-@@ -1191,6 +1202,8 @@ int RunServe(std::span<const char* const> args) {
+@@ -714,6 +726,10 @@ void PrintServeHelp(std::string_view program_name,
+     parser.AddOption("", "--min-draft-tokens", "N",
+                      "Adaptive draft floor (default: 1)", "Speculative",
+                      &min_draft_tokens);
++    parser.AddOption("", "--draft-vocab", "N",
++                     "Leading vocabulary rows the draft head may propose "
++                     "from; 0 keeps the full head (default: 0)",
++                     "Speculative", &draft_vocab_rows);
+     parser.AddOption(
+         "", "--prefill-chunk", "N",
+         "Maximum prompt tokens between active decode rounds (default: 512)",
+@@ -1166,6 +1182,7 @@ int RunServe(std::span<const char* const> args) {
+     std::string vision_model_path;
+     std::size_t draft_tokens = 7;
+     std::size_t min_draft_tokens = 1;
++    std::size_t draft_vocab_rows = 0;
+     std::size_t prefill_chunk_tokens =
+         server::kDefaultDecodeActivePrefillTokens;
+     std::size_t max_pending_requests = 16;
+@@ -1191,6 +1208,8 @@ int RunServe(std::span<const char* const> args) {
      std::uint32_t tp_control_port = 18516;
      std::string tp_bootstrap_host;
      std::string tp_control_token;
@@ -1313,7 +1431,7 @@ index e21cbbc..f1ca183 100644
      bool log_progress = false;
  
      gufo::cli::ArgParser llm_parser(
-@@ -1237,6 +1250,13 @@ int RunServe(std::span<const char* const> args) {
+@@ -1237,6 +1256,13 @@ int RunServe(std::span<const char* const> args) {
                           "RDMA GID index (default: 0 on InfiniBand, the "
                           "port's RoCE v2 GID on RoCE)",
                           "TP2", &tp_gid_index);
@@ -1327,7 +1445,37 @@ index e21cbbc..f1ca183 100644
      llm_parser.AddOption(
          "-n", "--max-tokens", "N",
          "Default new-token limit (default: -1 = until EOS or context full)",
-@@ -1454,6 +1474,14 @@ int RunServe(std::span<const char* const> args) {
+@@ -1280,6 +1306,10 @@ int RunServe(std::span<const char* const> args) {
+     llm_parser.AddOption("", "--min-draft-tokens", "N",
+                          "Adaptive draft floor (default: 1)", "Speculative",
+                          &min_draft_tokens);
++    llm_parser.AddOption("", "--draft-vocab", "N",
++                         "Leading vocabulary rows the draft head may propose "
++                         "from; 0 keeps the full head (default: 0)",
++                         "Speculative", &draft_vocab_rows);
+     llm_parser.AddOption(
+         "", "--prefill-chunk", "N",
+         "Maximum prompt tokens between active decode rounds (default: 512)",
+@@ -1368,7 +1398,8 @@ int RunServe(std::span<const char* const> args) {
+     }
+     if (draft_tokens == 0 || min_draft_tokens == 0 ||
+         min_draft_tokens > draft_tokens ||
+-        draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
++        draft_tokens > std::numeric_limits<std::uint32_t>::max() ||
++        draft_vocab_rows > std::numeric_limits<std::uint32_t>::max()) {
+       std::cerr << "Error: speculative draft limits are invalid\n";
+       return 2;
+     }
+@@ -1422,6 +1453,8 @@ int RunServe(std::span<const char* const> args) {
+         static_cast<std::uint32_t>(draft_tokens);
+     speculative_config.min_draft_tokens =
+         static_cast<std::uint32_t>(min_draft_tokens);
++    speculative_config.draft_vocab_rows =
++        static_cast<std::uint32_t>(draft_vocab_rows);
+     if (model.empty()) {
+       std::cerr << "Error: --model <PATH> is required\n";
+       return 2;
+@@ -1454,6 +1487,14 @@ int RunServe(std::span<const char* const> args) {
        std::cerr << "Error: invalid TP2 network/device options\n";
        return 2;
      }
@@ -1342,7 +1490,7 @@ index e21cbbc..f1ca183 100644
      if (tp_world_size == 2 &&
          (tp_control_token.empty() || tp_control_token.size() > 4096)) {
        std::cerr << "Error: TP2 requires --tp-control-token\n";
-@@ -1480,45 +1508,99 @@ int RunServe(std::span<const char* const> args) {
+@@ -1480,45 +1521,99 @@ int RunServe(std::span<const char* const> args) {
        (void)::sigaction(SIGINT, &stop, nullptr);
      }
      if (tp_world_size == 2) {
@@ -1476,7 +1624,7 @@ index e21cbbc..f1ca183 100644
        return 2;
  #endif
      }
-@@ -1640,9 +1722,13 @@ int RunServe(std::span<const char* const> args) {
+@@ -1640,9 +1735,13 @@ int RunServe(std::span<const char* const> args) {
      return 1;
    }
    // Rank 0 of a TP2 pair whose peer or link is gone fails every request, so
@@ -1492,7 +1640,7 @@ index e21cbbc..f1ca183 100644
    std::atomic<bool> serving{true};
    std::thread pair_watch;
    if (tp_rank_zero) {
-@@ -1654,10 +1740,16 @@ int RunServe(std::span<const char* const> args) {
+@@ -1654,10 +1753,16 @@ int RunServe(std::span<const char* const> args) {
            continue;
          }
          server::Logger::Error(
@@ -3601,6 +3749,60 @@ index ed3c70f..d75895d 100644
  add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
    cpu_ops.cpp reference.cpp)
  target_link_libraries(gufo_qwen38_flash_next_reference PUBLIC
+diff --git a/src/models/qwen38_flash_next/engine.cpp b/src/models/qwen38_flash_next/engine.cpp
+index 7b95fd1..90d64cd 100644
+--- a/src/models/qwen38_flash_next/engine.cpp
++++ b/src/models/qwen38_flash_next/engine.cpp
+@@ -189,6 +189,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
+                 exec.max_batch, std::uint64_t{options.max_draft_tokens} + 1))
+           : 1;
+   exec.max_speculative = exec.max_logit_rows;
++  exec.mtp_draft_rows = m->mtp_weights_ ? options.mtp_draft_rows : 0;
+   if (options.communicator) {
+     exec.all_reduce =
+         rocm::Executor::TwoRankAllReduce(options.communicator, c.hidden_size);
+diff --git a/src/models/qwen38_flash_next/engine.hpp b/src/models/qwen38_flash_next/engine.hpp
+index e34113c..9ce6cd8 100644
+--- a/src/models/qwen38_flash_next/engine.hpp
++++ b/src/models/qwen38_flash_next/engine.hpp
+@@ -49,6 +49,9 @@ struct ModelOptions {
+   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
+   /// it independent of scheduler timing preserves seeded request replay.
+   std::uint32_t decode_concurrency = 1;
++  /// Leading vocabulary rows the draft head may propose from; 0 keeps the
++  /// complete head. Target verification always reads every row.
++  std::uint32_t mtp_draft_rows = 0;
+   /// Optional two-rank expert-parallel identity. World size one preserves the
+   /// existing single-rank path and needs no communicator.
+   std::uint32_t tp_rank = 0;
+@@ -99,6 +102,10 @@ public:
+   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
+     return options_.decode_concurrency;
+   }
++  /// Configured draft-head vocabulary row limit; 0 means the full head.
++  [[nodiscard]] std::uint32_t MtpDraftRows() const noexcept {
++    return options_.mtp_draft_rows;
++  }
+   [[nodiscard]] std::uint32_t TpRank() const noexcept {
+     return options_.tp_rank;
+   }
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/batch.cpp b/src/models/qwen38_flash_next/kernels/rocm/batch.cpp
+index 72beddc..e01865a 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/batch.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/batch.cpp
+@@ -412,7 +412,11 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
+       }
+     }
+   }
+-  const auto& output = model_->output();
++  // Draft proposals may read only the leading vocabulary rows; the target
++  // head stays complete so verification is unaffected.
++  DeviceTensor output = model_->output();
++  if (options_.mtp_draft_rows > 0)
++    output.rows = std::min(output.rows, options_.mtp_draft_rows);
+   const auto& head = model_->mtp().nextn_head;
+   if (!AnyActive(items))
+     return true;
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp b/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
 index 3347a1d..1fd4ee4 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/communicator.hpp
@@ -3685,7 +3887,7 @@ index 3347a1d..1fd4ee4 100644
    /// Queues an exchange of `bytes` without blocking the caller: a background
    /// thread sends this rank's partial once the stream publishes it and
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
-index de09320..9178636 100644
+index de09320..084e6a0 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
 @@ -307,7 +307,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
@@ -3938,7 +4140,20 @@ index de09320..9178636 100644
    };
    return reduce;
  }
-@@ -2284,11 +2397,16 @@ bool Executor::ForwardPair(Session& session,
+@@ -1877,7 +1990,11 @@ bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
+ 
+ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
+                        bool candidates, std::string* error_msg) const {
+-  const DeviceTensor& output = model_->output();
++  // Draft proposals may read only the leading vocabulary rows; the target
++  // head stays complete so verification is unaffected.
++  DeviceTensor output = model_->output();
++  if (options_.mtp_draft_rows > 0)
++    output.rows = std::min(output.rows, options_.mtp_draft_rows);
+   if (!HcMix(head, res, false, s_.mixed, nullptr, 1, error_msg) ||
+       !Dense(output, s_.mixed, s_.logits, 1, error_msg)) {
+     return false;
+@@ -2284,11 +2401,16 @@ bool Executor::ForwardPair(Session& session,
        for (std::size_t i = 0; i < flying; ++i) {
          const Lane& lane = *in_flight[i];
          std::string ignored;
@@ -3959,7 +4174,7 @@ index de09320..9178636 100644
        executor->UseScratch(base);
      }
    } settle{this, base, in_flight, flying};
-@@ -2329,8 +2447,10 @@ bool Executor::ForwardPair(Session& session,
+@@ -2329,8 +2451,10 @@ bool Executor::ForwardPair(Session& session,
      }
      return true;
    };
@@ -3972,7 +4187,7 @@ index de09320..9178636 100644
    const auto finish = [&](Lane& lane) {
      if (flying == 0 || in_flight[0] != &lane) {
        AssignError(error_msg, "prefill pair sums finished out of order");
-@@ -2339,16 +2459,25 @@ bool Executor::ForwardPair(Session& session,
+@@ -2339,16 +2463,25 @@ bool Executor::ForwardPair(Session& session,
      in_flight[0] = in_flight[1];
      --flying;
      lane.pending = false;
@@ -4001,7 +4216,7 @@ index de09320..9178636 100644
      }
      return true;
    };
-@@ -2430,13 +2559,18 @@ bool Executor::ForwardPair(Session& session,
+@@ -2430,13 +2563,18 @@ bool Executor::ForwardPair(Session& session,
    if (session.mtp_enabled_) {
      // Catch up over A (hidden rows from A's residual), bridge to B's first
      // token from A's kept final row, keep B's rows, then catch up over B.
@@ -4023,7 +4238,7 @@ index de09320..9178636 100644
          !keep(lanes[1])) {
        return false;
      }
-@@ -2450,8 +2584,8 @@ bool Executor::ForwardPair(Session& session,
+@@ -2450,8 +2588,8 @@ bool Executor::ForwardPair(Session& session,
    if (session.mtp_enabled_ && n_b > 1) {
      PrefillPhase draft_phase(false);
      enter(lanes[1]);
@@ -4034,7 +4249,7 @@ index de09320..9178636 100644
        return false;
      }
    }
-@@ -2473,6 +2607,9 @@ bool Executor::MixerPart(Session& session, std::uint32_t il,
+@@ -2473,6 +2611,9 @@ bool Executor::MixerPart(Session& session, std::uint32_t il,
                                 error_msg, false, batch.emb_row)) {
      return false;
    }
@@ -4044,7 +4259,7 @@ index de09320..9178636 100644
    if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg)) {
      return false;
    }
-@@ -2495,21 +2632,39 @@ bool Executor::MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
+@@ -2495,21 +2636,39 @@ bool Executor::MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
                         std::string* error_msg) const {
    const DeviceLayer& l = model_->layers()[il];
    // Each combine also norms the residual for the mixer that follows it,
@@ -4092,7 +4307,7 @@ index de09320..9178636 100644
  }
  
 diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
-index b103e94..5b6e95f 100644
+index b103e94..5dfbd8d 100644
 --- a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
 +++ b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
 @@ -138,15 +138,20 @@ private:
@@ -4122,7 +4337,17 @@ index b103e94..5b6e95f 100644
    };
  
    struct Options {
-@@ -416,9 +421,18 @@ private:
+@@ -157,6 +162,9 @@ public:
+     std::uint32_t max_logit_rows{1};
+     /// Longest speculative batch; bounds the recurrent snapshot storage.
+     std::uint32_t max_speculative{1};
++    /// Leading vocabulary rows the draft head may propose from; 0 keeps
++    /// the complete head. Target verification always reads every row.
++    std::uint32_t mtp_draft_rows{0};
+     /// GPU-visible sum reduction used by the routed-expert boundary. The
+     /// callback is required only when DeviceModel carries world_size > 1.
+     std::function<bool(float*, std::size_t, hipStream_t, std::string*)>
+@@ -416,9 +424,18 @@ private:
                 std::uint32_t n_tokens, std::string* error_msg) const;
    /// `normed` says the previous Combine already produced m's grouped norm
    /// of res (F32 in s_.xn, or F16 plus tiled Q8 on the wide route).
@@ -4143,7 +4368,7 @@ index b103e94..5b6e95f 100644
    /// Share mixer projections across decode requests without selecting the
    /// prefill arithmetic. Injection rows are compact across the whole batch.
    bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
-@@ -427,7 +441,8 @@ private:
+@@ -427,7 +444,8 @@ private:
    void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
    /// Residual update by the block output plus the grouped norm for the next
    /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
@@ -4153,7 +4378,7 @@ index b103e94..5b6e95f 100644
    /// Hashes the batch's n-gram rows and starts reading them from disk, so
    /// the read overlaps the layers before the PLE one.
    bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
-@@ -690,8 +705,25 @@ private:
+@@ -690,8 +708,25 @@ private:
    mutable bool half_bf16_{false};
    /// Set by a combine that wrote s_.xn_half / s_.xn_q8t instead of s_.xn.
    mutable bool xn_half_{false};

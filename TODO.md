@@ -144,6 +144,26 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~13:30 D5 QUALIFIED + DEPLOYED as --draft-vocab 131072
+  (evidence/decode-tg/d5-qualification/): production option (default
+  full head), gufo 0847b4f, binary bd647f66 BOTH hosts (backup
+  gufo.036f07b7); guardian SERVE_DRAFT_VOCAB passthrough; unit sets
+  131072. Same-binary 4v4 flag-isolated A/B: decA2 +10.93%
+  [+10.51,+11.35], proseA +7.53, codeA1/A2 +6.37/+5.03, toolsA1/A2
+  +4.22/+7.14 (sampled too), decA1 +4.37 (one noise pair, identical
+  decision trace); outputs/held-out hashes bit-identical, seeded replay
+  exact (79 tok/s vs 71.9 full), constraints 9/9; multilingual panel:
+  ALL hashes identical flag-on/off; ja -10%, ru/ar -19% (tokens above
+  the prefix) vs de/fr/zh neutral, emoji +7 -> option defaults OFF.
+  Continuation identity versions draft_vocab_rows. INCIDENT: first ABBA
+  attempt served a stale pair after a silent stop failure (3 runs
+  quarantined .invalid-stale-pair; harness hardened: refuses held
+  port/leftover ranks, fails stops leaving rank0 alive, loop aborts on
+  failure). Prod: canaries 76.9/87.5 (best ever), tools smoke 58.0.
+  Campaign cumulative: frozen panel 47-81 -> 51-91 tok/s via EMA 0.85 +
+  interval-4 + draft-vocab, exactness gates intact. Frequency-ranked
+  subset parked (would cover high-ID scripts; needs index-mapped head
+  kernels). WIP patch regenerated (15491 lines, secret-clean).
 - 2026-10-08 ~12:10 D5 SCREEN: DRAFT-HEAD VOCAB PREFIX SUBSET +5-18%
   (evidence/decode-tg/d5-draft-vocab/): diag build 5b4a8bb1 (gufo
   ec775ae + GUFO_DRAFT_VOCAB row clamp, patch preserved + reverted;
