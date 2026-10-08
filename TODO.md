@@ -144,6 +144,24 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~07:40 PHASE 0+1 EXECUTED, PHASE 3 CLOSED (evidence/decode-tg/
+  ph1-attribution/): extended the d1-stabilization cycle-trace patch with
+  per-phase rank-0 wall timers (catch-up, draft build/head/body, verify
+  forward, selects, CPU sampling, rollback), grammar attribution (greedy
+  divert count; sampled zero-target-p rejections) and epoch timestamps;
+  diag binary 7511dcae both hosts (patch reverted after, gufo tree clean,
+  format pass). Matrix 5 fixtures x {C1,C2} x {d0,d32k} 20/20 clean.
+  RESULT: target verification forward = 72-86% of attributed decode time in
+  every cell; sampling+transfer+rollback <= 2.4% (D4 REJECTED by data);
+  greedy grammar diversions = 0 everywhere, sampled tools 12-15% of rounds
+  grammar-dead (D3 below bar); draft head 4-14% (D5 ceiling 2-7% e2e);
+  D8 copy share 15-58% on 8-grams (thinking-heavy; real-traffic share
+  unknown, stays parked). NEW POOLS: verify forward itself (only batching
+  + acceptance move it) and C2 unattributed wall 20-45% (scheduler
+  interleave/TP wait) -- rank-1 profiling pass recommended before D6/D7.
+  Per-request tok/s: rep 79.3/65.3 (d0/d32k), prose 61.8/47.9, code
+  43.5/47.3, tools ~50; C2 rep aggregate ~122. Ops: clean block, prod
+  restored first, canary 73.1 spec-decoding. Records pushed.
 - 2026-10-08 ~06:00 EMA 0.85 RETAINED + DEPLOYED (reversal of the overnight
   rejection): paired-CI re-analysis of the saved A/B records showed five of
   seven fixtures improving with CIs excluding zero (decA1 +3.10 [+2.54,

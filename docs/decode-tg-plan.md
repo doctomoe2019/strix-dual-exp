@@ -22,6 +22,26 @@ converged runs beat forced widths (80.8 tok/s), collapsed runs deliver
 continuation is draft-width controller stabilization** (EMA/probe/retry
 dynamics in `mtp_policy.hpp`), not cost tables or concurrency mapping.
 
+**Status 2026-10-08 (morning) — Phase 0+1 executed; Phase 3 closed with
+none of D3/D4/D5 promoted.** A diagnostic phase-trace build (per-phase
+rank-0 wall timers + grammar/zero-p attribution, patch preserved in
+`evidence/decode-tg/ph1-attribution/`, reverted after the run) ran the
+full baseline matrix: 5 fixtures × {C1,C2} × {d0,d32k}, 20/20 cells clean.
+Findings: **target verification forward dominates at 72–86% of attributed
+decode time everywhere**; draft head 4–14%; catch-up 3–12%; sampling+
+transfer+rollback ≤2.4%. D4 rejected by measurement (its hypothesized CPU/
+transfer share is absent at serving widths); D3's greedy lever is absent
+(zero grammar-diverted rounds — native tool tokens obey the grammar) with
+only a ~12–15%-of-tools-sampled-rounds ceiling via grammar-dead proposals;
+D5's ceiling is ~2–7% e2e on the easiest fixture. D8's copy share measured
+15–58% on 8-grams (thinking-heavy outputs; real agent-traffic share still
+unknown) — stays parked. New measured pools for any future work: (1) the
+verify forward itself — only concurrency batching (live) and acceptance
+move it, width economics are already optimized; (2) **C2 unattributed
+wall, 20–45% of concurrent-request wall** (scheduler interleave/TP wait
+outside mirrored calls) — the natural target for a rank-1-side profiling
+pass before considering D6/D7.
+
 **Status 2026-10-08 (overnight) — stabilization leg closed.** Matched-input
 E0 (`evidence/decode-tg/d1-stabilization/`) revised the picture again: the
 controller is **deterministic per request** (three passes bit-identical; the
