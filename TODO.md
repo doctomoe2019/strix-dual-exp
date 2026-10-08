@@ -144,6 +144,23 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~06:00 EMA 0.85 RETAINED + DEPLOYED (reversal of the overnight
+  rejection): paired-CI re-analysis of the saved A/B records showed five of
+  seven fixtures improving with CIs excluding zero (decA1 +3.10 [+2.54,
+  +3.66], decA2 +1.66, codeA2 +3.96, proseA +1.99, toolsA1 +9.07; codeA1
+  -0.79 with CI spanning zero), every pair positive on the improving
+  fixtures, greedy outputs bit-identical. The reported seeded-replay
+  failure was RETRACTED -- only server-minted tool-call IDs differed;
+  content identical across passes (hash bug). Lesson recorded: retention
+  standard = repeatable net improvement, not a fixed 5% cutoff. Gates:
+  mtp_sampling unit suite + format clean; tp2_constraints 9/9 on the
+  deployment binary; held-out greedy prompts bit-identical to baseline
+  across builds; within-build seeded replay exact (qual.py). gufo 2f9510c
+  (controller + EXPERIMENTS row) + 10cb479 (kept D2 selector test);
+  deployed 87e2fb95 BOTH hosts (backup gufo.0d559497); prod restart clean,
+  canary 72.9 tok/s spec-decoding, tools smoke 57.7 tok/s @76.3% acc with
+  decode_modes policy:0 (cooldown-AR rounds gone on this class; old logs
+  showed policy:16-48/request). WIP patch regenerated + pushed.
 - 2026-10-08 ~00:30 D1-STABILIZATION LEG CLOSED (evidence/decode-tg/
   d1-stabilization/): matched-input E0 established the controller is
   DETERMINISTIC per request (3 fresh-process passes bit-identical; the

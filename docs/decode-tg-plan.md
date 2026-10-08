@@ -28,13 +28,18 @@ controller is **deterministic per request** (three passes bit-identical; the
 "bimodality" was nonce-level workload variation), sits within ~8% of the
 per-request forced-width optimum on hard text and **beats every fixed width
 on easy text**; the loss concentrates in cooldown-retry storms (26% of
-rounds on hard/tools fixtures). An EMA 0.75→0.85 candidate passed gates but
-gained only 0–3.8% per fixture in a 4v4 serving A/B — **rejected** below the
-5% bar. Exact offline policy replay is impossible (catch-up vs mid-chain
-draft-state numerics differ; acceptance streams are policy-dependent). New
-follow-up flagged: **seeded-replay fragility via checkpoint-restored draft
-policy** (candidate showed fixed-seed outputs varying across passes). Phase
-3 (D3/D4 by workload-share data) is the next decision point.
+rounds on hard/tools fixtures). Exact offline policy replay is impossible
+(catch-up vs mid-chain draft-state numerics differ; acceptance streams are
+policy-dependent). An EMA 0.75→0.85 candidate was initially rejected below
+a 5% bar — **reversed same day**: paired-CI re-analysis showed five of
+seven fixtures improving with CIs excluding zero (the "seeded-replay
+failure" was tool-call-ID hashing, retracted), so the change was qualified
+(constraints 9/9, held-out outputs bit-identical across builds, seeded
+replay exact), **retained** (gufo `2f9510c`) and deployed (`87e2fb95`,
+tools smoke shows policy-AR rounds eliminated). Phase 3 (D3/D4 by
+workload-share data) is the next decision point. Retention standard going
+forward: repeatable net improvement with acceptable tradeoffs, not a fixed
+percentage cutoff.
 
 Everything below is either an established measurement (labeled with its
 source), a source-visible mechanism (labeled **unmeasured** — not a claimed

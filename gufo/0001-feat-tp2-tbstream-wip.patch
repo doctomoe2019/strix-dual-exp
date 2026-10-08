@@ -185,10 +185,18 @@ index b3832f4..46e5f79 100644
  and `previous_response_id` remain unsupported.
  
 diff --git a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-index 0b6a02b..c065f32 100644
+index 0b6a02b..2e88f76 100644
 --- a/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
 +++ b/docs/models/qwen3.8-flash-next/EXPERIMENTS.md
-@@ -46,6 +46,9 @@
+@@ -2,6 +2,7 @@
+ 
+ | Experiment | Decision / evidence |
+ | --- | --- |
++| Draft-acceptance EMA memory 0.75 → 0.85 | Retained. Matched-input serving traces (fixed prompts, three bit-identical passes) show the width controller within ~8% of the per-request forced-width optimum on hard text and ahead of every fixed width on easy text; the loss concentrates in cooldown-retry storms (26% of rounds on hard/tools fixtures). The slower estimator damps those storms: 4v4 paired serving A/B gains +3.1/+1.7/+4.0/+2.0% on hard-story/easy-story/code/prose fixtures (every pair positive, CIs exclude zero, greedy outputs bit-identical across arms), one code sibling −0.8% (CI includes zero), sampled tools ~flat with one fixture +9%. Backoff to AR still arms within ~9 fully rejected cycles; controller unit tests updated to that contract. Evidence: strix-dual-exp `evidence/decode-tg/d1-stabilization`. |
+ | Conversation checkpoints and asynchronous capture | Retained: edits, growing histories and rotation with bounded RAM; AR/MTP cancellation, image replay and disk restart pass, including four execution sessions. Intermediate copies allow peers to continue, and coincident RAM/disk boundaries share one copy. [Functional checks](../../../tests/functional/README.md). |
+ | Prefix-independent MTP cache projections | Retained: exact seeded replay across prompt splits and checkpoint replacement, using shared Q8 row arithmetic. [Checks and timings](artifacts/mtp-cache-replay.json). |
+ | Skip discarded MTP outputs | Retained: K/V-only prefill, compact catch-up and wider projection tiles; C1 costs remeasured. Prefill is within 0.3% of main; d0 TG remains 1.1% slower, d4K TG is 0.4% faster. |
+@@ -46,6 +47,9 @@
  | Batched MTP catch-up tail | Retained; after writing every attention cache row, compact final request rows into existing scratch and skip unused output projections/FFNs. Preserve the scalar arithmetic of one-row tails; full-head candidates and recursive carry match independent execution. |
  | Routed Q8 accumulation order | Retained; explicit rounded product/FMA prevents identical rows changing with column placement. Independent FP64 dot and predictor carry checks pass. |
  | Isolated MMQ quantizer rounding change | Deferred: it changes half-integer tie behavior shared with W8A8 and fails their existing agreement gate. No quantizer change retained. |
@@ -198,7 +206,7 @@ index 0b6a02b..c065f32 100644
  | SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
  | SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
  | Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
-@@ -65,6 +68,13 @@
+@@ -65,6 +69,14 @@
  | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
  | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
  | 128 n-gram readers | Rejected: first gather 179 → 140 ms, but no end-to-end change on repository prompts on two different NVMe drives (ABBA medians within 1%). |
@@ -208,11 +216,12 @@ index 0b6a02b..c065f32 100644
 +| HC projection stage-depth variants (barrier merge) | Rejected. Deepening the LDS K-stage of the fused HC kernels to cut the two-`__syncthreads`-per-stage count: the mix kernel at BK=2 (24→48 KB stage) runs **−9.3%** (471→522 µs @2 048 tokens, skip-F32 route) and the HC down at BK=8 (80→40 stages, 27.6→55.3 KB, bit-exact hash) runs **−19.2%** (401→478 µs) — the occupancy loss dominates the barrier saving, and both kernels sit at their practical WMMA ceilings for these shapes (28.5/33.5 TFLOPS-equivalent). The up epilogue's two barriers per 16-token group are the data-flow minimum at the 24 KB stage (a double-buffered `gates` plane needs 33.3 KB). Screening also exposed that `W8A8BlockedWmmaGEMMKernel`'s weight-fetch count floors `(BM·BK)/256` without a bounds check — BK=5/6 instantiations silently computed on unstaged rows — now guarded by `static_assert((BM·BK) % 256 == 0)`; `dense_gemm_bench` gained the previously missing HC-down case. Evidence: strix-dual-exp `evidence/prefill-triage/hc-v2`. |
 +| Mirrored request constraints for constrained TP2 MTP | Retained. A constrained request (tool grammar or response format) sent only a flag to rank 1, so `TpMirroredRunner::DecodeStep`/`DecodeBatch` fell back to one-token-at-a-time decoding — on the real workload ~64% of generated tokens ran at the AR rate (~33 tok/s). Now the request carries a `ConstraintRecipe` (the response-format source schema and the effective tools with their strict flags, required/parallel, resolved reasoning wrapper and final tool format), rank 1 rebuilds the grammar through the same composition code and binds it to its own vocabulary, and rank 0 waits for rank 1's sequence-correlated admission verdict before scheduling any model work for the request — an unrebuildable recipe or a failed sampler initialization rejects the request cleanly instead of diverging inside collectives. The handshake refuses to pair ranks whose constraint-vocabulary fingerprints (token pieces + stop bits) differ, or whose grammar-composition semantics identity differs (bumped with the native-tool backport). Grammar symbol layouts stay rank-local: only token ids, RNG and verdicts cross the wire, and each rank replays its own grammar state over the same accepted tokens. Native-tool correctness integrated from upstream (#441: native syntax kept for every schema, request-wide JSON fallback removed, delimiter/overlap and implicit-reasoning-end parser fixes, span-preserving tokenization, warm initial-mask reuse — with both TP2 builders adapted to the new `ToolParameters(schema, strict, format)` signature), plus Responses host-tools/namespaces/Codex-field tolerance (#434). Toy-pair coverage includes a constrained multi-token request whose grammar admits exactly one object, the admission-rejection path (channel survives, next request serves), recipe round trips and the flag/recipe coherence check (`tp_executor_test`, `tp_control_test`); the hosted CPU contract suite passes. `tests/functional/tp2_constraints.py` now requires drafts on every constrained MTP request and passed 9/9 on a live pair (tools auto/required/stream, schema buffered/streamed, parallel, mixed; drafts 15–36 per request). Live production pair: the same tool request moved 33.1 → 53.4 tok/s (`decode_modes=spec`, 64% acceptance, `finish=tool_calls`). Evidence: strix-dual-exp `evidence/prefill-triage/tp2-constrained-mtp/`. |
 +| Routed-expert packed weight layouts | Mechanism validated, integration parked. Byte-permuting reorganizations of the routed experts' encoded weights — Q5_1 down read from stage-major metadata/code planes (per K64 stage: 16 B/row of original `(d|m, qh)` records, then 32 B/row of 16-byte-aligned qs payloads) and paired Q4_K gate/up from chunk-major 1 KiB planes within 64-row block groups — preserve every dequantized byte and the accumulation order. Sibling kernel instantiations behind opt-in launch flags; a 512-expert bench with rotating padded routing maps and a raw-copy placement control measures **down −4.1…−7.5% and gate/up −2.1…−4.5%** (byte-identical outputs, controls within ±0.4%) at the production shapes and 1 024–4 096 tokens. Parked rather than retained: the modeled full-rollout effect is ≈+1% end-to-end @32k per rank, below the paired separation bar, while single-copy production residency would require converting every consumer of those tensors (all tile widths, non-paired routes and the MMQ decode vector kernels — the persistent-packed-SSM decode regression is the precedent), and the paired gate/up kernel is roughly half activation-reread-bound, capping weight-layout gains near 4%. The prototype (kernel siblings plus the bench) is preserved as a re-appliable patch in the evidence tree. Evidence: strix-dual-exp `evidence/prefill-triage/routed-w1`. |
++| Live-range selector grids for eager narrow TP2 decode | Rejected: exact (score/mark kernels never touch blocks at or past the complete count; two-rank executors never graph-replay) and gated by new deep-capacity live-range cases in the selector operator test (kept — they cover the wide path's pre-existing `live_blocks` contract), but immaterial: interleaved TP2 MTP pairs at 33k depth were bit-identical and dead even (4v4 medians 89.3 vs 89.3 tok/s; per-step 172 vs 172 ms), and the baseline itself shows no capacity sensitivity (ctx 65536 == 262144), so the empty selector workgroups were already free. A companion TP2 cycle-cost audit (depths 0/4k/32k, C1–C8) found width policy is ratio-driven and preserved: optimal widths match the single-host curves across the 0.4–0.8 acceptance band and diverge by one width only where tokens/ms is flat, so no TP2 cost profile was added. Evidence: strix-dual-exp `evidence/decode-tg/{d2-selector,d1-costs}`. |
 +| Prefill-chunk-aligned cache checkpoints | Retained. Intermediate continuation checkpoints sat on a 2 048-token grid regardless of the engine's prefill chunk, so a lone cold prefill clamped at every grid point and ran 2 048-token chunks where TP2's capacity is 4 096 — paired 1 024+1 024 trunk batches lose grouped-expert weight reuse, measured at −10…−12 % on cold ≤8 k prompts through serving (matched-pair attribution, canary band 1 969–2 032 against the probe's 2 282–2 304). The runner now publishes its engine prefill chunk (`TextRunnerDescriptor::prefill_chunk_tokens`, the Flash-Next runner reports `PrefillCapacity()`), and grid positions round up to chunk multiples and merge; runners that report nothing keep the default grid. Gates: pool toy tests including a new aligned-grid case (chunk spans 4 096/4 096/…, mid-prompt edits resume from 4 096 not 2 048/6 144), hosted CPU contract suite; live pair: cold 8 k **2 235–2 237 tok/s with 4 096-token chunks** (stock 1 969–2 032), 32 k unchanged (2 247.7), continuation restores from the aligned 8 192 checkpoint, snapshots still captured (0.68 GB vs 0.94 GB — fewer intermediate copies), constrained MTP healthy. Production canary moved 2 004.8 → **2 221.2**. Single host is unchanged by construction (capacity 2 048 = the grid). Evidence: strix-dual-exp `evidence/prefill-triage/gap`. |
  
  Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
  to dense projections and 12.6% to attention/indexing. Final-tile catch-up
-@@ -113,3 +123,41 @@ Development measurements, not published cells.
+@@ -113,3 +125,41 @@ Development measurements, not published cells.
  | Disk cache | Retained. Each rank keeps its half of a snapshot on its own disk; rank 0's store decides what is saved and restored. Q4 MTP: upstream's `check-continuation.py`, text and images, left 46 files (3.0 GB) per host; after both ranks restarted, every checked request was restored from disk and repeated its output, except one seeded sampled case's next turn. Memory had replaced that prompt's first capture with a later cold prefill's, whose state differs slightly (on one host too), while the disk kept the first. |
  | Prefill steps and reuse timing | Retained fixes, found with upstream's `check-continuation.py`. A TP2 rank's recurrent-gate projection (48 rows) fell outside the pinned F16 GEMM that one host uses for its 96, so hipBLASLt's tiles made a prefill depend on how the prompt was split into steps; pinned, `tp_probe --split` is bit-identical at 7/40/150/200 of 251 tokens and at 600/1,100 of 1,115. A released state or snapshot was reused only after rank 1's verdict, so a follow-up sent right after a client disconnect missed the cache; captures are now checked against rank 0's digest, and reuse before the verdict makes the reusing request depend on it. The check's default cases pass 8/8 on TP2, AR and MTP. Its remaining failures (a sampled replay that restores a cold-prefilled snapshot, whose decoded tokens were prefilled) occur on one host and on upstream `main` alike: decoding a token differs slightly from prefilling it (`tp_probe --decode-tail`). |
  | TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
@@ -7126,6 +7135,40 @@ index 386bae7..a7360df 100644
      }
      return finished.peer;
    }
+diff --git a/src/models/qwen38_flash_next/mtp_policy.hpp b/src/models/qwen38_flash_next/mtp_policy.hpp
+index 59bd857..115e088 100644
+--- a/src/models/qwen38_flash_next/mtp_policy.hpp
++++ b/src/models/qwen38_flash_next/mtp_policy.hpp
+@@ -14,6 +14,14 @@ namespace gufo::models::qwen38_flash_next {
+ 
+ inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
+ 
++// Acceptance-estimate memory: 0.85 keeps roughly the last seven cycles, so
++// a short rejection burst on a mostly-accepting request no longer collapses
++// the depth estimates and arms policy-AR intervals (2026-10-07 serving
++// traces: a hard fixture spent 25% of its rounds in cooldown while its
++// true first-draft acceptance was 81%). Sustained failure must still back
++// off to AR within ~9 fully-rejected cycles.
++inline constexpr float kAcceptanceEmaDecay = 0.85F;
++
+ struct MtpLengthState {
+   std::array<float, kMaxMtpDraftTokens> successes;
+   std::array<float, kMaxMtpDraftTokens> failures;
+@@ -64,10 +72,10 @@ public:
+     accepted = std::min(accepted, drafted);
+     const auto observed = accepted + (accepted < drafted ? 1 : 0);
+     for (std::size_t depth = 0; depth < observed; ++depth) {
+-      state_.successes[depth] =
+-          0.75F * state_.successes[depth] + (depth < accepted ? 1.0F : 0.0F);
+-      state_.failures[depth] =
+-          0.75F * state_.failures[depth] + (depth == accepted ? 1.0F : 0.0F);
++      state_.successes[depth] = kAcceptanceEmaDecay * state_.successes[depth] +
++                                (depth < accepted ? 1.0F : 0.0F);
++      state_.failures[depth] = kAcceptanceEmaDecay * state_.failures[depth] +
++                               (depth == accepted ? 1.0F : 0.0F);
+     }
+     // A fully accepted chain supplies no observations for its tail. Probe
+     // farther rather than permanently treating those depths as the prior.
 diff --git a/tests/cli/http_server_test.cpp b/tests/cli/http_server_test.cpp
 index cdf4159..95f225c 100644
 --- a/tests/cli/http_server_test.cpp
@@ -12304,6 +12347,104 @@ index 2cfd4f5..ed2edef 100644
      // Wide SSM projection: two K blocks per stage, with a partial token tile.
      ok = Run(2049, 16384, 2560, 0x16384256U, 2) < 1e-2 && ok;
      // A TP rank's GDN heads: 8 key and 24 value heads.
+diff --git a/tests/models/qwen38_flash_next/select_ops_test.cpp b/tests/models/qwen38_flash_next/select_ops_test.cpp
+index 9a65845..41cfcd5 100644
+--- a/tests/models/qwen38_flash_next/select_ops_test.cpp
++++ b/tests/models/qwen38_flash_next/select_ops_test.cpp
+@@ -317,6 +317,76 @@ void CheckPooling(unsigned start, unsigned capacity) {
+             << ", boundaries and replay exact\n";
+ }
+ 
++// A live-range-bounded score grid must be observationally exact: the score
++// kernel writes only blocks below each row's complete count and the mark
++// kernel never reads further, so bounding the grid to (or past) the last
++// row's complete blocks may not change a single mask word or score bit.
++// A deep capacity grid with a shallow live range is the two-rank eager
++// decode shape (graph replay never runs there).
++struct LaunchResult {
++  std::vector<std::uint32_t> mask;
++  std::vector<float> scores;
++};
++
++bool CheckLiveRange(std::uint32_t n_tokens, std::uint32_t start_pos,
++                    bool zero_queries) {
++  const std::uint32_t max_blocks = 65536;  // a 256K-token capacity grid
++  const std::uint32_t mask_words = max_blocks / 32;
++  const std::size_t q_count =
++      static_cast<std::size_t>(n_tokens) * kHeads * kDim;
++  auto qv = zero_queries ? std::vector<float>(q_count, 0.0F)
++                         : MakeValues(q_count, 0x5A17C0DEU, 1.0F);
++  auto blocks =
++      MakeValues(static_cast<std::size_t>(max_blocks) * kDim, 0x1D5EA11U, 1.0F);
++  std::vector<__half> blocks_half(blocks.size());
++  const auto half = [](float value) { return __float2half_rn(value); };
++  std::transform(blocks.begin(), blocks.end(), blocks_half.begin(), half);
++  const std::uint32_t live = (start_pos + n_tokens) / kRatio;
++
++  const auto launch = [&](std::uint32_t bound) {
++    float* d_q = Upload(qv);
++    __half* d_blocks = Upload(blocks_half);
++    std::uint32_t* d_pos = Upload(std::vector<std::uint32_t>{start_pos});
++    std::uint32_t* d_mask = Upload(std::vector<std::uint32_t>(
++        static_cast<std::size_t>(n_tokens) * mask_words, 0xA5A5A5A5U));
++    float* d_scores = Upload(std::vector<float>(
++        static_cast<std::size_t>(n_tokens) * max_blocks, -1.0F));
++    q::SelectBlocks(d_q, d_blocks, d_mask, d_scores, n_tokens, d_pos, 0, kHeads,
++                    kDim, kRatio, kBudget, mask_words, max_blocks, nullptr,
++                    bound);
++    CheckHip(hipDeviceSynchronize(), "live-range selection");
++    LaunchResult result{
++        Download(d_mask, static_cast<std::size_t>(n_tokens) * mask_words),
++        Download(d_scores, static_cast<std::size_t>(n_tokens) * max_blocks)};
++    for (void* pointer : {static_cast<void*>(d_q), static_cast<void*>(d_blocks),
++                          static_cast<void*>(d_pos), static_cast<void*>(d_mask),
++                          static_cast<void*>(d_scores)}) {
++      CheckHip(hipFree(pointer), "free live-range buffers");
++    }
++    return result;
++  };
++
++  // The executor's bound is the last row's complete-block count; anything
++  // at or above it must reproduce the capacity-grid launch exactly.
++  const LaunchResult reference = launch(0);
++  bool ok = true;
++  for (const std::uint32_t bound : {live, live + 37}) {
++    const LaunchResult bounded = launch(bound);
++    if (bounded.mask != reference.mask) {
++      std::cerr << "live bound " << bound << " changed the mask\n";
++      ok = false;
++    }
++    if (bounded.scores != reference.scores) {
++      std::cerr << "live bound " << bound << " changed a score\n";
++      ok = false;
++    }
++  }
++  std::cout << "live-range bound n=" << n_tokens << " start=" << start_pos
++            << " live=" << live << " zero_queries=" << zero_queries
++            << ": mask and scores exact\n";
++  return ok;
++}
++
+ }  // namespace
+ 
+ int main() {
+@@ -344,6 +414,16 @@ int main() {
+     ok = Run(1, 20000, 0, false, kBudget + 128, false, ScoreLayout::kAligned,
+              TiedBlocks::kSuffix) &&
+          ok;
++    // Live-range grid bounds: narrow eager decode shapes against a deep
++    // capacity grid, including a full-tie row, a sub-budget context and a
++    // row that crosses the budget boundary mid-launch.
++    ok = CheckLiveRange(1, 30000, false) && ok;
++    ok = CheckLiveRange(4, 30000, false) && ok;
++    ok = CheckLiveRange(8, 131069, false) && ok;
++    ok = CheckLiveRange(7, 131069, true) && ok;
++    ok = CheckLiveRange(33, 30000, false) && ok;
++    ok = CheckLiveRange(3, 900, false) && ok;
++    ok = CheckLiveRange(5, 2052, false) && ok;
+     return ok ? 0 : 1;
+   } catch (const std::exception& error) {
+     std::cerr << error.what() << '\n';
 diff --git a/tests/models/qwen38_flash_next/tp_batched_probe.cpp b/tests/models/qwen38_flash_next/tp_batched_probe.cpp
 index 3327b02..b4c4bba 100644
 --- a/tests/models/qwen38_flash_next/tp_batched_probe.cpp
