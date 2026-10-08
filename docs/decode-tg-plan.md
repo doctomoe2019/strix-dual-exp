@@ -22,6 +22,21 @@ converged runs beat forced widths (80.8 tok/s), collapsed runs deliver
 continuation is draft-width controller stabilization** (EMA/probe/retry
 dynamics in `mtp_policy.hpp`), not cost tables or concurrency mapping.
 
+**Status 2026-10-08 (evening) — D5 screen: draft-head prefix subset
++5–18% with output invariance at ≥128K rows** (`evidence/decode-tg/
+d5-draft-vocab/`). `GUFO_DRAFT_VOCAB` row clamp on the draft head only
+(diag build `5b4a8bb1`, reverted; target verification full-vocab): rep
++18%/+10.7% at 64K/128K, hard1 +10.5%/+6%, toolsg +10.6%/+6.9%, code
++4–6%; head cost row-linear as ph2 predicted (streaming-bound). Greedy
+outputs bit-identical to the full head at 128K/192K on every fixture
+(only rep at 64K differs) — this panel lives in the low-ID core.
+Caveat: a static prefix loses draft coverage for high-ID-token traffic
+(multilingual/rare); the qualification panel must measure that downside
+before retention, and a frequency-ranked subset remains the robust
+variant. Prototype qualification is the next step (prefix-128K vs
+frequency-ranked decision, broader panel incl. multilingual, sampled
+tools, constraints, continuation-identity versioning for the row count).
+
 **Status 2026-10-08 (later) — AR re-probe interval 16→4 qualified,
 RETAINED and deployed** (`evidence/decode-tg/ph3-cooldown/`): 4v4 ABBA
 against the EMA-0.85 binary with bit-identical greedy outputs —

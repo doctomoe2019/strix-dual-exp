@@ -144,6 +144,22 @@ Withdrawn/qualified conclusions (do not build on these):
 
 ## Log
 
+- 2026-10-08 ~12:10 D5 SCREEN: DRAFT-HEAD VOCAB PREFIX SUBSET +5-18%
+  (evidence/decode-tg/d5-draft-vocab/): diag build 5b4a8bb1 (gufo
+  ec775ae + GUFO_DRAFT_VOCAB row clamp, patch preserved + reverted;
+  target verify full-vocab). rep 79.5 -> 93.9 (+18%) @64K rows, 88.0
+  (+10.7%) @128K; hard1 +10.5/+6.0; toolsg +10.6/+6.9; code +4-6 --
+  head cost row-linear exactly as ph2's streaming model predicted.
+  Greedy outputs BIT-IDENTICAL to the full head at 128K/192K on all
+  fixtures (only rep@64K differs) -- this panel lives in the low-ID
+  vocab core (248320 rows are mostly extended/multilingual). Caveat:
+  static prefix loses draft coverage for high-ID-token traffic
+  (multilingual/rare) -> acceptance degrades toward AR there
+  (correctness never at risk). NEXT: prototype qualification with a
+  multilingual-heavy panel; prefix-128K vs frequency-ranked decision;
+  continuation identity must version the row count. Prod restored
+  first: canaries 79.6-80.9 tok/s (best ever; one 38.5 first-request
+  warmup outlier, repeats healthy, smoke 48.6 normal acceptance).
 - 2026-10-08 ~10:40 AR RE-PROBE INTERVAL 16->4 RETAINED + DEPLOYED
   (evidence/decode-tg/ph3-cooldown/): follow-up to the ph2 screen.
   kArRetryTokens=4 (gufo ec775ae, binary 036f07b7; baseline = EMA-0.85
