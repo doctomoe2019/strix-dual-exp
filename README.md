@@ -135,7 +135,49 @@ gains are solid. **Benchmark-grade dual-host runs (gufo's bench
 harness, both corpora, tg128, multi-user) are the pending
 measurement** — see Ongoing work.
 
-**3. A link that survives its own hardware — and a wedge trigger that
+**3. A serving + decode optimization campaign, measurement-first
+(2026-10-07/08).** With the transport proven (~0 ms/call overhead: rank-
+matched timing shows the mirrored RPC fully hidden behind the executing
+rank's compute) and per-phase attribution placing 72–86% of decode time
+in the target verification forward, the campaign kept only what paired
+A/B evidence supported — five retained changes, all live in production:
+
+| Change | Effect (paired, matched inputs) |
+| --- | --- |
+| Mirrored request constraints for constrained TP2 MTP | tool/schema requests decode speculatively instead of falling back one-token-at-a-time: a real tools request **33.1 → 52.4 tok/s** |
+| Prefill-chunk-aligned cache checkpoints | cold ≤8k prefill 1969–2032 → **2235–2237 tok/s** (prod canary 2005 → 2221) |
+| `--prefill-chunk 2048` scheduling budget | prefill during active decode 1234 → **2022 tok/s (+64 %)**; decode alongside it 73.6 → 78.1 |
+| Draft-acceptance EMA 0.75 → 0.85 (width controller) | **+1.7–4.0 %** on greedy fixtures (cooldown-retry storms damped) |
+| AR re-probe interval 16 → 4 tokens | **+0.6–7.5 %** (AR-heavy code fixture +7.5 %; recovery-bound requests) |
+| `--draft-vocab 131072` draft-head row limit | **+4–11 %** (easy text +10.9 %, prose +7.5 %, sampled tools +4–7 %) |
+
+Cumulative on the frozen benchmark panel, greedy matched inputs,
+bit-identical outputs at every step:
+
+| Fixture | Before (2026-10-07) | After (2026-10-08, live) | Δ |
+| --- | ---: | ---: | ---: |
+| Hard story | 47.1 | 51.0 | +8 % |
+| Easy story (repetitive) | 79.5 | 91.1 | **+15 %** |
+| Coding | 47.9 | 54.6 | **+14 %** |
+| Coding (second panel) | 47.0 | 52.3 | +11 % |
+| Prose | 59.8 | 65.8 | +10 % |
+
+The production canary band moved from ~71–73 to **77–88 tok/s**. Method
+notes: every retained change was qualified with paired log-mean
+differences and CIs (no fixed percentage bar), bit-identical greedy
+outputs and held-out hashes across arms, exact seeded sampled replay
+within a build, and the constraints suite 9/9. Two candidate avenues
+were closed **by measurement** rather than implemented: compact sampled
+verification (transfers+CPU measured at ≤2.4 % of decode time) and
+grammar-aware drafting (zero grammar-diverted greedy rounds on real
+tool traffic). The draft-vocab row limit defaults off: Japanese loses
+10 % and Russian/Arabic ~19 % at 131072 rows (their tokens sit above
+the prefix; German/French/Chinese stay neutral) — deployments choose
+per workload. Provenance: `evidence/prefill-triage/` and
+`evidence/decode-tg/*/SUMMARY.md`; decisions in gufo's
+`EXPERIMENTS.md` rows.
+
+**4. A link that survives its own hardware — and a wedge trigger that
 is now fixed.** The Barlow Ridge host-to-host link has a failure mode
 where stream teardown desyncs one host's NHI control plane until reboot
 (see `docs/wedge-investigation.md`). Two layers now address it:
@@ -173,10 +215,6 @@ where stream teardown desyncs one host's NHI control plane until reboot
   mixed-precision `v_fma_mix*_f16`; no source-level replay is
   bit-exactible). Ranked fixes and their estimated ceilings are in the
   doc.
-- **Deploy HCF1 to serving**: the retained fusion lives in gufo's
-  committed branch (`4c68409`) but the deployed serve binary predates it —
-  rebuild `.#tp2-tbstream`, redeploy both hosts, smoke, then refresh the
-  serve-side numbers when `gufo-prod` returns.
 - **Wedge residuals**: the primary trigger (teardown while the peer is
   mid-stream) is fixed by baseline-B; what remains is to quantify any
   cable-end-correlated residue with controlled cable-identification
@@ -188,12 +226,15 @@ where stream teardown desyncs one host's NHI control plane until reboot
   design-fixed but not yet observed end-to-end in the wild; the
   control-channel stall race quarantined behind the XDomain workqueue
   is worth root-fixing (see `docs/upstream/`).
-- **Continue the optimization program** to fully exhaust whatever
-  performance is still gainable in the transport and serving path —
-  starting with benchmark-grade dual-host numbers (gufo's bench
-  harness over the pair, tg128 windows, both corpora) and multi-user
-  batching, so the decode-side gains are measured as rigorously as
-  the prefill side.
+- **Decode campaign follow-ups** (the measured headroom is mostly
+  spent — see `docs/decode-tg-plan.md` for the full ranked record): a
+  frequency-ranked draft-vocabulary subset would extend the `--draft-vocab`
+  win to scripts whose tokens sit above the low-ID core (needs
+  index-mapped draft-head kernels); two-active-request scheduling
+  (C2 interleave) and a suffix/prompt-lookup drafter remain gated on
+  real-traffic share data. Benchmark-grade dual-host numbers (gufo's
+  bench harness over the pair, tg128 windows, both corpora) are still
+  the pending measurement.
 
 ## What is in here
 
@@ -209,8 +250,10 @@ where stream teardown desyncs one host's NHI control plane until reboot
 - `gufo/` — the user-space side as one WIP patch against gufo's
   `feat/tp2-tbstream` branch (diff vs the `feat/tp2-rdma` base, sanitized):
   the stream transport, the TP2 probe tooling, graceful-exit hardening,
-  and the retained prefill optimizations (fused peer combine, TP2 launch
-  plans, GDN row-split, HC inject emission into the combine).
+  and the retained prefill and decode optimizations (fused peer combine,
+  TP2 launch plans, GDN row-split, HC inject emission into the combine,
+  the chunk-aligned cache checkpoints, the stabilized MTP width
+  controller, and the `--draft-vocab` draft-head row limit).
 - `scripts/` — day-2 operations: link bring-up, pair qualification and
   storm validation, forensics capture, and the `tbstream-heal@`
   last-mile healer (systemd unit included).
