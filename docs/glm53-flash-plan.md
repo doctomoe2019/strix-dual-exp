@@ -9,7 +9,7 @@ tok/s** serving-level (chunk 4096, ~3.4K cold prompts; 105.9 @ 5.9K,
 of the three mover families plus a bit-identical split-launch sparse MLA
 — the ≥ 250 objective is closed NOT MET on a measured roofline (the
 expert family is register-bound, the Q8_0 family at ~99 % of its DRAM
-ceiling; both at their floors leave ≈ 183 tok/s), with the final
+ceiling; both at their floors leave ≈ 190 tok/s), with the final
 per-family roofline and ranked residual ceilings in the goal worktree's
 `notes/final-ws-250.md` and evidence in
 `evidence/glm53-flash/p7v/`; 32K-deep prefill exercised at 47.2 tok/s
