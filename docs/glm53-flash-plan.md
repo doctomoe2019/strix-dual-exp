@@ -12,9 +12,21 @@ expert family is register-bound, the Q8_0 family at ~99 % of its DRAM
 ceiling; both at their floors leave ≈ 190 tok/s), with the final
 per-family roofline and ranked residual ceilings in the goal worktree's
 `notes/final-ws-250.md` and evidence in
-`evidence/glm53-flash/p7v/`; 32K-deep prefill exercised at 47.2 tok/s
-(pre-ws) and 62.0 tok/s (ws kernels, probe); the
-4K→128K→256K ladder itself still pending; P6 records accumulating
+`evidence/glm53-flash/p7v/`. The **64K serving + speculative-decoding
+campaign** (goal `2026-10-11-glm-serving-64k-spec`) then closed
+2026-10-12: the serving ladder is **qualified at 4096/32768/65536 with
+1 session and at 32768 with 2 sessions** (retrieval batteries with an
+adversarial needle at both deep rungs, pair oracle 44/44 cross-rank,
+cold prefill 114.2-115.1 tok/s at ~3.4K re-verified on the final tree;
+per-rank GTT 93.3-94.8 GiB of 120 at every qualified config;
+`evidence/glm53-flash/p8-64k-spec/`), artifact-free prompt-lookup
+speculative decoding is **landed default-OFF, NOT QUALIFIED** (serving
+cap-truncation duplication blocker; c(4)=2.52 at 32K depth; +139 %
+prose / −5 % reasoning-code), and the production-rollout prerequisites
+(GLM+Qwen cannot coexist: 50.9+94.7=145.6>120 GiB; guardian/unit and
+port parameters) are recorded in that goal's `notes/final-64k-spec.md`.
+The 128K/256K ladder rungs remain pending (memory model says both fit);
+P6 records accumulating
 (`docs/models/glm-5.3-flash/README.md` carries the measured throughput
 and method). Owner: agent sessions + user.
 Scope of this document: the full first leg — bring GLM-5.3-Flash up as a
