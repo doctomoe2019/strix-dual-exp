@@ -15,9 +15,11 @@
 # Env: SERVE_BIN, SERVE_MODEL, SERVE_MTP, SERVE_CONTEXT (65536),
 # SERVE_SESSIONS (1), SERVE_PORT (8080), SERVE_BOOTSTRAP_PORT (18515),
 # SERVE_CONTROL_PORT (18516), SERVE_CANARY_TPS (1900),
-# SERVE_CANARY_TOKENS (8192), SERVE_MAX_RETRIES (3), SERVE_CONFIRM (1:
+# SERVE_CANARY_TOKENS (8192), SERVE_DRAFT_VOCAB (unset: full head), SERVE_MAX_RETRIES (3), SERVE_CONFIRM (1:
 # one confirmation canary before declaring a warmed SLOW).
 # Hosts/tbnet from env.sh (neutral defaults below).
+# Optional persistent cache: SERVE_CACHE_DISK (directory on each rank),
+# SERVE_CACHE_DISK_BYTES, SERVE_CACHE_DISK_STAGING_BYTES and SERVE_CACHE_RAM_BYTES.
 _dir=$(dirname "$(readlink -f "$0")")
 [ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
 : "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.0.0}"
@@ -123,6 +125,13 @@ while :; do
     --tp-control-token $TOKEN --context $SERVE_CONTEXT --sessions $SERVE_SESSIONS"
   [ -n "$SERVE_MODEL_NAME" ] && ARGS="$ARGS --served-model-name $SERVE_MODEL_NAME"
   [ -n "$SERVE_PREFILL_CHUNK" ] && ARGS="$ARGS --prefill-chunk $SERVE_PREFILL_CHUNK"
+  [ -n "$SERVE_DRAFT_VOCAB" ] && ARGS="$ARGS --draft-vocab $SERVE_DRAFT_VOCAB"
+  [ -n "$SERVE_CACHE_RAM_BYTES" ] && ARGS="$ARGS --cache-ram-bytes $SERVE_CACHE_RAM_BYTES"
+  if [ -n "$SERVE_CACHE_DISK" ]; then
+    ARGS="$ARGS --cache-disk $SERVE_CACHE_DISK --cache-disk-format chunked"
+    [ -n "$SERVE_CACHE_DISK_BYTES" ] && ARGS="$ARGS --cache-disk-bytes $SERVE_CACHE_DISK_BYTES"
+    [ -n "$SERVE_CACHE_DISK_STAGING_BYTES" ] && ARGS="$ARGS --cache-disk-staging-bytes $SERVE_CACHE_DISK_STAGING_BYTES"
+  fi
 
   # Rank 1 first (hostB), then rank 0 here; PORT env carries the port.
   # The log directory must exist on both hosts (rank1's redirect happens
