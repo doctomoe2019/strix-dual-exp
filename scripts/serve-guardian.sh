@@ -20,6 +20,11 @@
 # Hosts/tbnet from env.sh (neutral defaults below).
 # Optional persistent cache: SERVE_CACHE_DISK (directory on each rank),
 # SERVE_CACHE_DISK_BYTES, SERVE_CACHE_DISK_STAGING_BYTES and SERVE_CACHE_RAM_BYTES.
+# systemd units carry no HOME by default; the GGUF digest cache resolves its
+# directory through HOME and silently disables itself without it (a ~120 s
+# full-model re-fingerprint on every rank 0 restart). ssh-launched rank 1
+# always has HOME from sshd.
+export HOME="${HOME:-/root}"
 _dir=$(dirname "$(readlink -f "$0")")
 [ -f "$_dir/env.sh" ] && . "$_dir/env.sh"
 : "${HOST_A:=hostA}" "${HOST_B:=hostB}" "${TBNET_BASE:=10.0.0}"
@@ -171,7 +176,20 @@ while :; do
   if [ "$verdict" = "FAST" ]; then
     log "cycle $cycle: accepted (rank0 pid $R0_PID, rank1 pid $R1_PID, logs: $LOG_DIR); supervising"
     wait "$R0_PID"
-    log "rank0 exited; restarting with a fresh retry budget"
+    rank0_exit=$?
+    # The per-cycle log is overwritten on every restart; preserve the crashed
+    # pair's evidence (both rank logs, exit status, kernel tail) before the
+    # next cycle reuses the filenames.
+    crash="$LOG_DIR/crash-$(date +%Y%m%d-%H%M%S)"
+    if mkdir -p "$crash"; then
+      cp -a "$LOG_DIR/r0-c$cycle.log" "$crash/" 2>/dev/null || true
+      scp -q "$HOST_B:$LOG_DIR/r1-c$cycle.log" "$crash/" 2>/dev/null || true
+      {
+        echo "time=$(date -Is) rank0_pid=$R0_PID rank1_pid=$R1_PID exit=$rank0_exit"
+        dmesg | tail -n 50
+      } > "$crash/meta.txt" 2>/dev/null || true
+    fi
+    log "rank0 exited (exit=$rank0_exit); evidence: $crash; restarting with a fresh retry budget"
     cycle=0
     teardown
     sleep 5
