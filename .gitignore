@@ -14,3 +14,7 @@ modules.order
 .cache/
 # runtime logs
 *.log
+# python cache from the ple-native drivers
+scripts/__pycache__/
+# built tokenizer helper (cpp source is tracked)
+scripts/ple-native-tokenize
